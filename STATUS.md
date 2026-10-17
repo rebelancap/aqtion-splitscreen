@@ -304,6 +304,17 @@ host row "Cell layout"; notices never take a player's cell.
 
 ## Last round
 
+- **Linux smoke of the 1.0.0 release tarball (Windows lead, 2026-10-17, the
+  Linux test box in Game mode, headless):** `q2pro-splitscreen` run from the
+  AQtion root as `+set dedicated 1` with `+map junglecity`, bots on: loaded
+  Steam's `action/gamex86_64.so`, two bots entered the game, `version`
+  1.0.0; it needed `libjpeg.so.8` supplied from Steam's runtime (the gap
+  1.0.0.1 closes). The 21 terrain node files match `work/l1/terrain-before.
+  sha256`; the game library rewrote its scratch `items.txt` as always. The
+  1.0.0.1 binary passed `ldd` there; a bare run of it was cut short when the
+  box was shut down (unverified in-game). The box's mirror is behind by the
+  1.0.0.1 commits (push `splitscreen` there next time it is on).
+
 **Linux release binary without libjpeg.so.8 (1.0.0.1), 2026-10-17,
 branch `splitscreen` (tree synced to `main`).** The `linux-x86_64` job now
 builds libjpeg-turbo from `subprojects/libjpeg-turbo.wrap` as a static
