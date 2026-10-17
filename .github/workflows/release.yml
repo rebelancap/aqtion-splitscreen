@@ -63,7 +63,12 @@ jobs:
   # Packages: upstream's linux64 list minus avcodec / patchelf, plus the GL,
   # xkbcommon and vorbis headers.  Meson options: scripts/build.sh's
   # (upstream's Linux set minus --auto-features / --fatal-meson-warnings,
-  # plus the splitscreen ones); system libraries only (nofallback).
+  # plus the splitscreen ones); system libraries (nofallback) except
+  # libjpeg-turbo: built from subprojects/libjpeg-turbo.wrap and linked
+  # statically (--force-fallback-for; meson.build passes the wrap
+  # default_library=static and jpeg-turbo=disabled), because Ubuntu's
+  # libjpeg.so.8 is missing on Fedora-based systems (libjpeg.so.62 only).
+  # Meson from pip: the wrap needs meson >= 0.64, 22.04's apt has 0.61.
   linux-x86_64:
     name: Linux x86_64
     needs: version
@@ -76,16 +81,19 @@ jobs:
     - name: Install dependencies
       run: |
         sudo apt-get -qq update
-        sudo DEBIAN_FRONTEND=noninteractive apt-get install -y meson \
+        sudo DEBIAN_FRONTEND=noninteractive apt-get install -y \
           ninja-build pkg-config libsdl2-dev libopenal-dev libpng-dev \
           libjpeg-dev zlib1g-dev mesa-common-dev libgl-dev libegl-dev \
           libcurl4-openssl-dev libx11-dev libxi-dev libxext-dev \
           libwayland-dev wayland-protocols libdecor-0-dev libxkbcommon-dev \
           libogg-dev libvorbis-dev uuid-dev libjansson-dev
+        python3 -m pip install --no-input --user meson
+        echo "$HOME/.local/bin" >> "$GITHUB_PATH"
 
     - name: Build
       run: |
         meson setup builddir --buildtype=release -Dwrap_mode=nofallback \
+          --force-fallback-for=libjpeg-turbo \
           -Daqtion-build=true -Dgamepad=enabled -Dsystem-wide=false \
           -Dhomedir= -Ddiscord-sdk=false -Davcodec=disabled -Dsdl2=enabled \
           -Dx11=enabled -Dwayland=enabled -Dwindows-crash-dumps=disabled \
@@ -105,9 +113,9 @@ jobs:
         tar tzvf "aqtion-splitscreen-$VERSION-linux-x86_64.tar.gz"
 
     # Highest glibc symbol version must be <= 2.35 (Ubuntu 22.04's);
-    # NEEDED is printed for the record (expect libjpeg.so.8, which Steam's
-    # runtime and SteamOS have, plus SDL2, libcurl, libpng, zlib, GL/EGL,
-    # Wayland, X11).
+    # NEEDED must not contain libjpeg (libjpeg-turbo is linked statically,
+    # see above) and is printed for the record (expect SDL2, libcurl,
+    # libpng, zlib, GL/EGL, Wayland, X11, libc / libm).
     - name: Check glibc and NEEDED
       run: |
         GLIBC_MAX="$(objdump -T q2pro-splitscreen | grep -o 'GLIBC_[0-9.]*' | sort -uV | tail -1)"
@@ -118,6 +126,13 @@ jobs:
           exit 1
         fi
         readelf -d q2pro-splitscreen | grep NEEDED
+        if readelf -d q2pro-splitscreen | grep NEEDED | grep -q libjpeg; then
+          echo "::error::q2pro-splitscreen links libjpeg dynamically (expected static libjpeg-turbo)"
+          exit 1
+        fi
+        # JPEG support must still be there (libjpeg-turbo's copyright message)
+        grep -aq 'libjpeg-turbo' q2pro-splitscreen || { echo "::error::no static libjpeg-turbo in q2pro-splitscreen"; exit 1; }
+        echo "libjpeg-turbo: linked statically"
 
     - uses: actions/upload-artifact@v7
       with:

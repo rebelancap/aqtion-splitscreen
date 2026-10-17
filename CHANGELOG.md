@@ -1,5 +1,10 @@
 # Changelog
 
+## 1.0.0.1 (dev)
+
+- Linux: the binary no longer needs libjpeg.so.8 (libjpeg-turbo is linked
+  in); runs on Fedora / Bazzite outside Steam.
+
 ## 1.0.0
 
 First public release of aqtion-splitscreen: local splitscreen for AQtion
