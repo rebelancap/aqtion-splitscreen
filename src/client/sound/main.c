@@ -644,6 +644,7 @@ void S_IssuePlaysound(playsound_t *ps)
     ch->sfx = ps->sfx;
     VectorCopy(ps->origin, ch->origin);
     ch->fixed_origin = ps->fixed_origin;
+    ch->context = ps->context;
     ch->pos = 0;
     ch->end = s_paintedtime + sc->length;
 
@@ -685,6 +686,10 @@ void S_StartSound(const vec3_t origin, int entnum, int entchannel, qhandle_t hSf
             return;
     }
 
+    // splitscreen: every local player's connection hears the same event
+    if (s_split_numents && S_SplitDuplicate(sfx, origin, entnum, entchannel, attenuation))
+        return;
+
     // make sure the sound is loaded
     sc = S_LoadSound(sfx);
     if (!sc)
@@ -708,6 +713,7 @@ void S_StartSound(const vec3_t origin, int entnum, int entchannel, qhandle_t hSf
     ps->volume = vol;
     ps->sfx = sfx;
     ps->begin = s_api->get_begin_ofs(timeofs);
+    ps->context = cla->playerNum;
 
     // sort into the pending sound list
     LIST_FOR_EACH(playsound_t, sort, &s_pendingplays, entry)
@@ -856,6 +862,14 @@ void S_Update(void)
     if (!s_started)
         return;
 
+    // splitscreen: listener, entities and loop sounds are player 1's
+    if (cla != clx[0]) {
+        CL_PushContext(0);
+        S_Update();
+        CL_PopContext();
+        return;
+    }
+
     // if the laoding plaque is up, clear everything
     // out to make sure we aren't looping a dirty
     // dma buffer while loading
@@ -871,6 +885,8 @@ void S_Update(void)
     } else {
         listener_entnum = cl.frame.clientNum + 1;
     }
+
+    S_SplitUpdate();
 
     OGG_Update();
 

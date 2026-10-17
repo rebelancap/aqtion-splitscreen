@@ -327,10 +327,13 @@ void        UI_DrawRect8(const vrect_t *rect, int border, int c);
 void        UI_StringDimensions(vrect_t *rc, int flags, const char *string);
 
 void        UI_LoadScript(void);
+bool        UI_GetFocusedField(char *text, size_t size, char *label, size_t labelsize, int *maxChars);
+void        UI_SetFocusedField(const char *text);
 menuFrameWork_t *UI_FindMenu(const char *name);
 
 void        Menu_Init(menuFrameWork_t *menu);
 void        Menu_Size(menuFrameWork_t *menu);
+int         Menu_NeededHeight(const menuFrameWork_t *menu);  // splitscreen fork: ui.c menu size
 void        Menu_Draw(menuFrameWork_t *menu);
 void        Menu_AddItem(menuFrameWork_t *menu, void *item);
 menuSound_t Menu_SelectItem(menuFrameWork_t *menu);

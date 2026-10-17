@@ -1104,6 +1104,15 @@ static bool parse_basic_params(conn_params_t *p)
     return true;
 }
 
+// splitscreen: our listen server treats 127/8 like loopback, so the local
+// players 2..8 (UDP from 127.0.0.1) are not limited like remote clients
+static bool SV_IsLocalPlayer(const netadr_t *adr)
+{
+    if (NET_IsLocalAddress(adr))
+        return true;
+    return !COM_DEDICATED && adr->type == NA_IP && adr->ip.u8[0] == 127;
+}
+
 static bool permit_connection(conn_params_t *p)
 {
     addrmatch_t *match;
@@ -1132,6 +1141,10 @@ static bool permit_connection(conn_params_t *p)
         return reject("No challenge for address.\n");
 
     svs.challenges[i].challenge = 0;
+
+    // splitscreen: local players skip ban, lock and sv_iplimit checks
+    if (SV_IsLocalPlayer(&net_from))
+        return true;
 
     // check for banned address
     if ((match = SV_MatchAddress(&sv_banlist, &net_from)) != NULL) {
@@ -2142,6 +2155,12 @@ static void SV_PacketEvent(void)
             }
         }
 
+        // splitscreen: a zombie keeps its port; a new connection from the
+        // same address and qport (a re-added local player) is not its
+        if (client->state == cs_zombie && netchan->remote_address.port != net_from.port) {
+            continue;
+        }
+
         if (netchan->remote_address.port != net_from.port) {
             Com_DPrintf("Fixing up a translated port for %s: %d --> %d\n",
                         client->name, netchan->remote_address.port, net_from.port);
@@ -2263,8 +2282,10 @@ static void SV_CheckTimeouts(void)
             continue;
         }
 
-        // never timeout local clients
-        if (NET_IsLocalAddress(&client->netchan.remote_address)) {
+        // never timeout local clients (splitscreen: but do free a kicked or
+        // dropped local player's zombie, or its slot is never reusable)
+        if (NET_IsLocalAddress(&client->netchan.remote_address) ||
+            (client->state != cs_zombie && SV_IsLocalPlayer(&client->netchan.remote_address))) {
             continue;
         }
         // NOTE: delta calculated this way is not sensitive to overflow
@@ -2651,7 +2672,7 @@ void SV_UserinfoChanged(client_t *cl)
     }
 
     // never drop over the loopback
-    if (NET_IsLocalAddress(&cl->netchan.remote_address)) {
+    if (SV_IsLocalPlayer(&cl->netchan.remote_address)) {
         cl->rate = 0;
     }
 

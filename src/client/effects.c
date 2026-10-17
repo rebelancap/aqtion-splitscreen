@@ -32,12 +32,8 @@ LIGHT STYLE MANAGEMENT
 ==============================================================
 */
 
-typedef struct {
-    int     length;
-    float   map[MAX_QPATH - 1];
-} clightstyle_t;
-
-static clightstyle_t    cl_lightstyles[MAX_LIGHTSTYLES];
+// per player context (client_context_t)
+#define cl_lightstyles      (cla->fx.lightstyles)
 
 static void CL_ClearLightStyles(void)
 {
@@ -86,7 +82,7 @@ DLIGHT MANAGEMENT
 ==============================================================
 */
 
-static cdlight_t       cl_dlights[MAX_DLIGHTS];
+#define cl_dlights          (cla->fx.dlights)
 
 static void CL_ClearDlights(void)
 {
@@ -820,9 +816,9 @@ PARTICLE MANAGEMENT
 ==============================================================
 */
 
-static cparticle_t  *active_particles, *free_particles;
-
-static cparticle_t  particles[MAX_PARTICLES];
+#define active_particles    (cla->fx.active_particles)
+#define free_particles      (cla->fx.free_particles)
+#define particles           (cla->fx.particles)
 
 static void CL_ClearParticles(void)
 {
@@ -1651,9 +1647,6 @@ void CL_TeleportParticles(const vec3_t org)
                 p->accel[2] = -PARTICLE_GRAVITY;
             }
 }
-
-extern int          r_numparticles;
-extern particle_t   r_particles[MAX_PARTICLES];
 
 /*
 ===============

@@ -154,6 +154,8 @@ typedef struct {
     glStateBits_t   fog_bits, fog_bits_sky;
     int             framebuffer_width;
     int             framebuffer_height;
+    int             framebuffer_frame_w, framebuffer_frame_h;   // largest post-process scene this frame
+    int             framebuffer_last_w, framebuffer_last_h;     // ... and the frame before (splitscreen)
     bool            framebuffer_ok;
     bool            framebuffer_bound;
 } glRefdef_t;
@@ -873,9 +875,14 @@ typedef struct {
     color_t     colors[2]; // 0 - actual color, 1 - transparency (for text drawing)
     bool        scissor;
     float       scale;
+    bool        rect_set;   // false = whole window
+    vrect_t     rect;       // 2D draw rect in window pixels (R_SetDrawRect)
 } drawStatic_t;
 
 extern drawStatic_t draw;
+
+void GL_GetDrawRect(vrect_t *rc);
+void GL_ScissorDrawRect(void);
 
 #if USE_DEBUG
 extern qhandle_t r_charset;
@@ -898,7 +905,7 @@ void Scrap_Upload(void);
 void GL_InitImages(void);
 void GL_ShutdownImages(void);
 
-bool GL_InitFramebuffers(void);
+bool GL_InitFramebuffers(int width, int height);
 
 extern cvar_t *gl_intensity;
 

@@ -53,6 +53,12 @@ option('dynamic-lights',
   value: true, 
   description: 'dynamic lighting')
 
+option('gamepad',
+  type: 'feature',
+  value: 'auto',
+  description: 'Gamepad support (SDL2 joystick/gamecontroller only, independent of the sdl2 '+
+  'video/audio option; on Windows SDL2 is linked statically from subprojects/sdl2.wrap)')
+
 option('game-abi-hack',
   type: 'feature',
   value: 'disabled',

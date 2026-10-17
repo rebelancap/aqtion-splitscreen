@@ -19,6 +19,7 @@ with this program; if not, write to the Free Software Foundation, Inc.,
 
 #include "client.h"
 #include "common/crc.h"
+#include "split/gamepad.h"
 
 static cvar_t    *cl_nodelta;
 static cvar_t    *cl_maxpackets;
@@ -136,6 +137,8 @@ void IN_Frame(void)
     if (input.modified) {
         IN_Restart_f();
     }
+
+    PAD_Frame();    // splitscreen: gamepads
 }
 
 /*
@@ -230,21 +233,25 @@ Key_Event (int key, bool down, unsigned time);
 ===============================================================================
 */
 
-typedef struct {
-    int         down[2];        // key nums holding it down
-    unsigned    downtime;        // msec timestamp
-    unsigned    msec;            // msec down this frame
-    int         state;
-} kbutton_t;
+// kbutton_t is in client.h; the button state is per player context
+#define in_klook        (cla->in.in_klook)
+#define in_left         (cla->in.in_left)
+#define in_right        (cla->in.in_right)
+#define in_forward      (cla->in.in_forward)
+#define in_back         (cla->in.in_back)
+#define in_lookup       (cla->in.in_lookup)
+#define in_lookdown     (cla->in.in_lookdown)
+#define in_moveleft     (cla->in.in_moveleft)
+#define in_moveright    (cla->in.in_moveright)
+#define in_strafe       (cla->in.in_strafe)
+#define in_speed        (cla->in.in_speed)
+#define in_use          (cla->in.in_use)
+#define in_attack       (cla->in.in_attack)
+#define in_up           (cla->in.in_up)
+#define in_down         (cla->in.in_down)
 
-static kbutton_t    in_klook;
-static kbutton_t    in_left, in_right, in_forward, in_back;
-static kbutton_t    in_lookup, in_lookdown, in_moveleft, in_moveright;
-static kbutton_t    in_strafe, in_speed, in_use, in_attack;
-static kbutton_t    in_up, in_down;
-
-static int          in_impulse;
-static bool         in_mlooking;
+#define in_impulse      (cla->in.in_impulse)
+#define in_mlooking     (cla->in.in_mlooking)
 
 static void KeyDown(kbutton_t *b)
 {
@@ -437,8 +444,9 @@ static float CL_KeyState(const kbutton_t *key)
 
 //==========================================================================
 
-static float autosens_x;
-static float autosens_y;
+// per player context (zoom auto-sensitivity follows that player's fov)
+#define autosens_x      (cla->in.autosens_x)
+#define autosens_y      (cla->in.autosens_y)
 
 /*
 ================
@@ -453,6 +461,9 @@ static void CL_MouseMove(void)
 
     if (!vid || !vid->get_mouse_motion) {
         return;
+    }
+    if (cla->playerNum) {
+        return; // splitscreen: the mouse is player 1's
     }
     if (cls.key_dest & (KEY_MENU | KEY_CONSOLE)) {
         return;
@@ -562,6 +573,9 @@ static void CL_BaseMove(vec3_t move)
     if ((in_speed.state & 1) ^ cl_run->integer) {
         VectorScale(move, 2, move);
     }
+
+    // splitscreen: this context's pad (left stick)
+    CL_GamepadMove(move);
 }
 
 static void CL_ClampSpeed(vec3_t move)
@@ -616,6 +630,9 @@ void CL_UpdateCmd(int msec)
 
     // allow mice to add to the move
     CL_MouseMove();
+
+    // splitscreen: this context's pad (right stick)
+    CL_GamepadLook(msec);
 
     // add accumulated mouse forward/side movement
     cl.localmove[0] += cl.mousemove[0];
@@ -740,7 +757,9 @@ void CL_FinalizeCmd(void)
     vec3_t move;
 
     // command buffer ticks in sync with cl_maxfps
-    Cbuf_Frame(&cmd_buffer);
+    // (splitscreen: the console buffer once, each player's stufftext buffer)
+    if (!cla->playerNum)
+        Cbuf_Frame(&cmd_buffer);
     Cbuf_Frame(&cl_cmdbuf);
 
     if (cls.state != ca_active) {
@@ -759,7 +778,10 @@ void CL_FinalizeCmd(void)
     if (in_use.state & 3)
         cl.cmd.buttons |= BUTTON_USE;
 
-    if (cls.key_dest == KEY_GAME && Key_AnyKeyDown()) {
+    if (cls.key_dest == KEY_GAME && Key_AnyKeyDown() && !cla->playerNum) {
+        cl.cmd.buttons |= BUTTON_ANY;
+    }
+    if (PAD_AnyButtonDown()) {      // splitscreen: this player's pad
         cl.cmd.buttons |= BUTTON_ANY;
     }
 
@@ -1084,7 +1106,7 @@ static void CL_SendUserinfo(void)
     int i;
 
     if (cls.userinfo_modified == MAX_PACKET_USERINFOS) {
-        size_t len = Cvar_BitInfo(userinfo, CVAR_USERINFO);
+        size_t len = CL_SplitUserinfo(userinfo, Cvar_BitInfo(userinfo, CVAR_USERINFO));
         Com_DDPrintf("%s: %u: full update\n", __func__, com_framenum);
         MSG_WriteByte(clc_userinfo);
         MSG_WriteData(userinfo, len + 1);

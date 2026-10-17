@@ -519,6 +519,8 @@ If origin is NULL, the origin is determined from the entity origin
 or the midpoint of the entity box for bmodels.
 ==================
 */
+static cvar_t *sv_showsounds;
+
 static void SV_StartSound(const vec3_t origin, edict_t *edict,
                           int channel, int soundindex, float volume,
                           float attenuation, float timeofs)
@@ -550,6 +552,20 @@ static void SV_StartSound(const vec3_t origin, edict_t *edict,
     att = min(att, 255);
 
     ent = NUM_FOR_EDICT(edict);
+
+    // splitscreen (0.0.0.27): sv_showsounds 1 logs the game's humor sounds
+    // (sound/user/, sound/insane/), 2 every sound, with the entity that made it
+    if (!sv_showsounds)
+        sv_showsounds = Cvar_Get("sv_showsounds", "0", 0);
+    if (sv_showsounds->integer) {
+        const char *sname = sv.configstrings[svs.csr.sounds + soundindex];
+        if (sv_showsounds->integer > 1 || !Q_strncasecmp(sname, "user/", 5) ||
+            !Q_strncasecmp(sname, "insane/", 7))
+            Com_Printf("sv sound %u: %s, entity %d%s%s, channel %d\n", svs.realtime, sname, ent,
+                       ent >= 1 && ent <= sv_maxclients->integer ? " " : "",
+                       ent >= 1 && ent <= sv_maxclients->integer ? svs.client_pool[ent - 1].name : "",
+                       channel & 7);
+    }
 
     sendchan = (ent << 3) | (channel & 7);
 
@@ -1116,6 +1132,96 @@ void G_InitializeExtensions(void)
 }
 
 
+/*
+===============================================================================
+
+LEGACY AQTION GAME API 4 (splitscreen)
+
+The game DLL Steam ships (action\gamex86_64.dll, TNG 2.82, built against the
+2023 engine 9eb6182) reports API 4 like ours but has the old AQtion layout,
+removed upstream in v1.3.8:
+- it copies 45 pointers of game_import_t, the 45th being CheckForExtension,
+  and calls it from GetGameAPI (NULL here -> crash, Spike A);
+- its game_export_t has FetchGameExtension between ServerCommand and edicts;
+- it has no GetGameAPIEx.
+A library without GetGameAPIEx gets the import with CheckForExtension
+appended (a DLL with the current layout copies only what it knows). If it
+then says API 4, its exports are read through game_export_aq4_t: ge points
+to a copy whose functions wrap the DLL's and refresh edicts / edict_size /
+num_edicts / max_edicts after every call (only the game changes them, and
+only inside these calls). DLLs with GetGameAPIEx (ours) are unaffected.
+
+===============================================================================
+*/
+
+typedef struct {
+    game_import_t   gi;
+    void            *(*CheckForExtension)(const char *name);
+} game_import_aq4_t;
+
+typedef struct {
+    byte            funcs[q_offsetof(game_export_t, edicts)];  // same as game_export_t
+    void            *(*FetchGameExtension)(const char *name);
+    struct edict_s  *edicts;
+    int             edict_size;
+    int             num_edicts;
+    int             max_edicts;
+} game_export_aq4_t;
+
+static game_export_aq4_t    *aq4_ge;    // the DLL's own struct
+static game_export_t        aq4_dll;    // its functions
+static game_export_t        aq4_shim;   // what ge points to
+
+static void AQ4_Sync(void)
+{
+    aq4_shim.edicts = aq4_ge->edicts;
+    aq4_shim.edict_size = aq4_ge->edict_size;
+    aq4_shim.num_edicts = aq4_ge->num_edicts;
+    aq4_shim.max_edicts = aq4_ge->max_edicts;
+}
+
+static void AQ4_Init(void) { aq4_dll.Init(); AQ4_Sync(); }
+static void AQ4_Shutdown(void) { aq4_dll.Shutdown(); }
+static void AQ4_SpawnEntities(const char *mapname, const char *entstring, const char *spawnpoint)
+{ aq4_dll.SpawnEntities(mapname, entstring, spawnpoint); AQ4_Sync(); }
+static void AQ4_WriteGame(const char *filename, qboolean autosave) { aq4_dll.WriteGame(filename, autosave); AQ4_Sync(); }
+static void AQ4_ReadGame(const char *filename) { aq4_dll.ReadGame(filename); AQ4_Sync(); }
+static void AQ4_WriteLevel(const char *filename) { aq4_dll.WriteLevel(filename); AQ4_Sync(); }
+static void AQ4_ReadLevel(const char *filename) { aq4_dll.ReadLevel(filename); AQ4_Sync(); }
+static qboolean AQ4_ClientConnect(edict_t *ent, char *userinfo)
+{ qboolean ret = aq4_dll.ClientConnect(ent, userinfo); AQ4_Sync(); return ret; }
+static void AQ4_ClientBegin(edict_t *ent) { aq4_dll.ClientBegin(ent); AQ4_Sync(); }
+static void AQ4_ClientUserinfoChanged(edict_t *ent, char *userinfo) { aq4_dll.ClientUserinfoChanged(ent, userinfo); AQ4_Sync(); }
+static void AQ4_ClientDisconnect(edict_t *ent) { aq4_dll.ClientDisconnect(ent); AQ4_Sync(); }
+static void AQ4_ClientCommand(edict_t *ent) { aq4_dll.ClientCommand(ent); AQ4_Sync(); }
+static void AQ4_ClientThink(edict_t *ent, usercmd_t *cmd) { aq4_dll.ClientThink(ent, cmd); AQ4_Sync(); }
+static void AQ4_RunFrame(void) { aq4_dll.RunFrame(); AQ4_Sync(); }
+static void AQ4_ServerCommand(void) { aq4_dll.ServerCommand(); AQ4_Sync(); }
+
+static const game_export_t *AQ4_WrapExports(game_export_t *dll)
+{
+    aq4_ge = (game_export_aq4_t *)dll;
+    memcpy(&aq4_dll, dll, sizeof(aq4_ge->funcs));
+    aq4_shim = aq4_dll;
+    aq4_shim.Init = AQ4_Init;
+    aq4_shim.Shutdown = AQ4_Shutdown;
+    aq4_shim.SpawnEntities = AQ4_SpawnEntities;
+    aq4_shim.WriteGame = AQ4_WriteGame;
+    aq4_shim.ReadGame = AQ4_ReadGame;
+    aq4_shim.WriteLevel = AQ4_WriteLevel;
+    aq4_shim.ReadLevel = AQ4_ReadLevel;
+    aq4_shim.ClientConnect = AQ4_ClientConnect;
+    aq4_shim.ClientBegin = AQ4_ClientBegin;
+    aq4_shim.ClientUserinfoChanged = AQ4_ClientUserinfoChanged;
+    aq4_shim.ClientDisconnect = AQ4_ClientDisconnect;
+    aq4_shim.ClientCommand = AQ4_ClientCommand;
+    aq4_shim.ClientThink = AQ4_ClientThink;
+    aq4_shim.RunFrame = AQ4_RunFrame;
+    aq4_shim.ServerCommand = AQ4_ServerCommand;
+    AQ4_Sync();
+    return &aq4_shim;
+}
+
 #endif
 
 
@@ -1166,6 +1272,24 @@ void SV_InitGameProgs(void)
     // load a new game dll
     import = game_import;
 
+    // get extended api if present
+    game_entry_ex_t entry_ex = Sys_GetProcAddress(game_library, "GetGameAPIEx");
+
+#ifdef AQTION_EXTENSION
+    bool legacy_aq4 = false;
+    if (!entry_ex) {
+        // maybe the Steam DLL's old API 4 (see above): it wants CheckForExtension
+        game_import_aq4_t import_aq4 = { .gi = game_import, .CheckForExtension = G_CheckForExtension };
+        game_export_t *dll = entry(&import_aq4.gi);
+        if (dll && dll->apiversion == GAME_API_VERSION_AQTION) {
+            ge = AQ4_WrapExports(dll);
+            legacy_aq4 = true;
+            Com_Printf("Game library uses the legacy AQtion API 4 (2023 layout), adapted.\n");
+        } else {
+            ge = dll;
+        }
+    } else
+#endif
     ge = entry(&import);
     if (!ge) {
         Com_Error(ERR_DROP, "Game library returned NULL exports");
@@ -1178,8 +1302,6 @@ void SV_InitGameProgs(void)
                   ge->apiversion, GAME_API_VERSION_OLD, GAME_API_VERSION_NEW);
     }
 
-    // get extended api if present
-    game_entry_ex_t entry_ex = Sys_GetProcAddress(game_library, "GetGameAPIEx");
     Com_Printf("==== Extended Protocol ====\n");
     if (entry_ex) {
         gex = entry_ex(&game_import_ex);
@@ -1198,6 +1320,13 @@ void SV_InitGameProgs(void)
 
     // initialize
     ge->Init();
+
+#ifdef AQTION_EXTENSION
+    if (legacy_aq4 && aq4_ge->FetchGameExtension) {
+        GE_customizeentityforclient = aq4_ge->FetchGameExtension("customizeentityforclient");
+        GE_CvarSync_Updated = aq4_ge->FetchGameExtension("CvarSync_Updated");
+    }
+#endif
 
     if (g_features->integer & GMF_PROTOCOL_EXTENSIONS) {
         Com_Printf("Game supports Q2PRO protocol extensions.\n");

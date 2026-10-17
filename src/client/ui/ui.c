@@ -27,6 +27,28 @@ LIST_DECL(ui_menus);
 cvar_t    *ui_debug;
 static cvar_t    *ui_open;
 static cvar_t    *ui_scale;
+static cvar_t    *ui_menusize;      // splitscreen fork: cl_splitMenuSize
+
+// splitscreen (design 7.1): in game with N > 1 the UI lives in player 1's
+// cell, which is its screen (uis.width / height, mouse, draw rect)
+static vrect_t   ui_cell;
+static bool      ui_in_cell;
+
+static void UI_Resize(void);
+static void UI_CheckMenuSize(void);
+
+static void UI_CheckCell(void)
+{
+    vrect_t rc;
+    bool in = CL_SplitUIRect(&rc);
+
+    if (in == ui_in_cell && (!in || !memcmp(&rc, &ui_cell, sizeof(rc))))
+        return;
+    ui_in_cell = in;
+    if (in)
+        ui_cell = rc;
+    UI_Resize();
+}
 
 // ===========================================================================
 
@@ -41,6 +63,11 @@ void UI_PushMenu(menuFrameWork_t *menu)
 
     if (!menu) {
         return;
+    }
+
+    // splitscreen: the player whose context opens the UI owns it (its cell)
+    if (!uis.menuDepth) {
+        CL_SplitUIOpened();
     }
 
     // if this menu is already present, drop back to that level
@@ -69,6 +96,8 @@ void UI_PushMenu(menuFrameWork_t *menu)
         return;
     }
 
+    UI_CheckCell();
+    UI_CheckMenuSize();
     Menu_Init(menu);
 
     Key_SetDest((Key_GetDest() & ~KEY_CONSOLE) | KEY_MENU);
@@ -77,7 +106,8 @@ void UI_PushMenu(menuFrameWork_t *menu)
 
     if (!uis.activeMenu) {
         // opening menu moves cursor to the nice location
-        IN_WarpMouse(menu->mins[0] / uis.scale, menu->mins[1] / uis.scale);
+        IN_WarpMouse((ui_in_cell ? ui_cell.x : 0) + menu->mins[0] / uis.scale,
+                     (ui_in_cell ? ui_cell.y : 0) + menu->mins[1] / uis.scale);
 
         uis.mouseCoords[0] = menu->mins[0];
         uis.mouseCoords[1] = menu->mins[1];
@@ -94,13 +124,80 @@ void UI_PushMenu(menuFrameWork_t *menu)
     }
 }
 
+/*
+=================
+UI_MenuSizeScale
+
+Splitscreen fork: with the automatic scale (ui_scale 0) the menus are drawn
+cl_splitMenuSize times larger (default 2; 1 = upstream) -- the size of the
+player who owns the UI (p<N>_cl_splitMenuSize, ui owner in split_menu.c).
+The size is relative to the window, so a menu keeps its size when the
+screen splits into cells, as long as the top menu still fits the screen
+(or the owner's cell); if it does not, it is drawn only as much smaller as
+needed to fit (0.0.0.25; before, the cell's own smaller scale was the base
+and the menu shrank with every split). Never below one screen pixel per
+virtual pixel. scale = virtual pixels per screen pixel; base = upstream's
+scale for this screen / cell.
+=================
+*/
+#define UI_SIZE_MIN_WIDTH   400     // virtual width every menu gets at least
+#define UI_SIZE_MIN_HEIGHT  240     // ... and height of a self-sizing menu
+
+static float UI_MenuSizeScale(float base, float window, int w, int h)
+{
+    float size, want, fit;
+    int need;
+
+    if (!ui_menusize || base <= 0 || window <= 0)
+        return base;
+    size = Q_clipf(CL_SplitUIMenuSize(), 1, 4);
+    if (size <= 1)
+        return base;
+    need = uis.menuDepth ? Menu_NeededHeight(uis.layers[uis.menuDepth - 1]) : 0;
+    // a menu of items needs its own height (a compact one far less than the
+    // floor); one that lays itself out gets the floor
+    fit = min((float)h / (need > 0 ? need : UI_SIZE_MIN_HEIGHT), (float)w / UI_SIZE_MIN_WIDTH);
+    want = min(size / window, fit);
+    if (want < 1)
+        want = 1;
+    return 1.0f / want;
+}
+
+static float UI_TargetScale(void)
+{
+    float scale = R_ClampScale(ui_scale);
+
+    if (ui_scale->value)
+        return scale;
+    if (ui_in_cell)
+        return UI_MenuSizeScale(CL_SplitUIScale(scale, &ui_cell), scale, ui_cell.width, ui_cell.height);
+    return UI_MenuSizeScale(scale, scale, r_config.width, r_config.height);
+}
+
+// a menu was pushed / popped: the menu size may give the new top another scale
+static void UI_CheckMenuSize(void)
+{
+    if (ui_scale && UI_TargetScale() != uis.scale)
+        UI_Resize();
+}
+
+static void ui_menusize_changed(cvar_t *self)
+{
+    UI_Resize();
+}
+
 static void UI_Resize(void)
 {
     int i;
 
-    uis.scale = R_ClampScale(ui_scale);
-    uis.width = Q_rint(r_config.width * uis.scale);
-    uis.height = Q_rint(r_config.height * uis.scale);
+    uis.scale = UI_TargetScale();
+    if (ui_in_cell) {
+        uis.width = Q_rint(ui_cell.width * uis.scale);
+        uis.height = Q_rint(ui_cell.height * uis.scale);
+    } else {
+        uis.width = Q_rint(r_config.width * uis.scale);
+        uis.height = Q_rint(r_config.height * uis.scale);
+    }
 
     for (i = 0; i < uis.menuDepth; i++) {
         Menu_Init(uis.layers[i]);
@@ -158,6 +255,7 @@ void UI_PopMenu(void)
     uis.activeMenu = uis.layers[uis.menuDepth - 1];
     uis.mouseTracker = NULL;
 
+    UI_CheckMenuSize();
     UI_DoHitTest();
 }
 
@@ -168,11 +266,18 @@ UI_IsTransparent
 */
 bool UI_IsTransparent(void)
 {
+    vrect_t rc;
+
     if (!(Key_GetDest() & KEY_MENU)) {
         return true;
     }
 
     if (!uis.activeMenu) {
+        return true;
+    }
+
+    // in player 1's cell: the other cells keep drawing
+    if (CL_SplitUIRect(&rc)) {
         return true;
     }
 
@@ -394,8 +499,13 @@ UI_MouseEvent
 */
 void UI_MouseEvent(int x, int y)
 {
-    x = Q_clip(x, 0, r_config.width - 1);
-    y = Q_clip(y, 0, r_config.height - 1);
+    if (ui_in_cell) {
+        x = Q_clip(x - ui_cell.x, 0, ui_cell.width - 1);
+        y = Q_clip(y - ui_cell.y, 0, ui_cell.height - 1);
+    } else {
+        x = Q_clip(x, 0, r_config.width - 1);
+        y = Q_clip(y, 0, r_config.height - 1);
+    }
 
     uis.mouseCoords[0] = Q_rint(x * uis.scale);
     uis.mouseCoords[1] = Q_rint(y * uis.scale);
@@ -420,6 +530,12 @@ void UI_Draw(unsigned realtime)
 
     if (!uis.activeMenu) {
         return;
+    }
+
+    UI_CheckCell();
+    UI_CheckMenuSize();     // the owner's size may have changed (p<N>_ cvar)
+    if (ui_in_cell) {
+        R_SetDrawRect(&ui_cell);
     }
 
     R_ClearColor();
@@ -464,6 +580,51 @@ void UI_Draw(unsigned realtime)
 
     R_ClearColor();
     R_SetScale(1.0f);
+
+    if (ui_in_cell) {
+        R_SetDrawRect(NULL);
+    }
+}
+
+/*
+=================
+UI_GetFocusedField / UI_SetFocusedField
+
+Splitscreen on-screen keyboard (split_menu.c): the focused text field of
+the top menu, its label and length limit; replacing its text.
+=================
+*/
+bool UI_GetFocusedField(char *text, size_t size, char *label, size_t labelsize, int *maxChars)
+{
+    menuCommon_t *item;
+    menuField_t *f;
+
+    if (!(Key_GetDest() & KEY_MENU) || !uis.activeMenu)
+        return false;
+    item = Menu_ItemAtCursor(uis.activeMenu);
+    if (!item || item->type != MTYPE_FIELD)
+        return false;
+    f = (menuField_t *)item;
+    Q_strlcpy(text, f->field.text, size);
+    Q_strlcpy(label, item->status ? item->status : item->name ? item->name : "", labelsize);
+    *maxChars = f->field.maxChars ? (int)f->field.maxChars : f->width;
+    return true;
+}
+
+void UI_SetFocusedField(const char *text)
+{
+    menuCommon_t *item;
+    menuField_t *f;
+
+    if (!uis.activeMenu)
+        return;
+    item = Menu_ItemAtCursor(uis.activeMenu);
+    if (!item || item->type != MTYPE_FIELD)
+        return;
+    f = (menuField_t *)item;
+    IF_Replace(&f->field, text);
+    if (item->change)
+        item->change(item);
 }
 
 void UI_StartSound(menuSound_t sound)
@@ -558,6 +719,13 @@ static void UI_PushMenu_f(void)
         return;
     }
     s = Cmd_Argv(1);
+    // splitscreen: never prompt for a name at start (AQtion's postinit.cfg
+    // pushes "first_start" while the name is the default); names are set in
+    // the overlay's Settings / Profile pages or the console
+    if (!Q_stricmp(s, "first_start")) {
+        Com_DPrintf("pushmenu %s: skipped (splitscreen build)\n", s);
+        return;
+    }
     menu = UI_FindMenu(s);
     if (menu) {
         UI_PushMenu(menu);
@@ -591,6 +759,9 @@ void UI_ModeChanged(void)
 {
     ui_scale = Cvar_Get("ui_scale", "0", 0);
     ui_scale->changed = ui_scale_changed;
+    // splitscreen fork: the menus twice upstream's size by default (TV / pad play)
+    ui_menusize = Cvar_Get("cl_splitMenuSize", "2", CVAR_ARCHIVE);
+    ui_menusize->changed = ui_menusize_changed;
     UI_Resize();
 }
 
@@ -663,6 +834,8 @@ void UI_Shutdown(void)
     UI_ForceMenuOff();
 
     ui_scale->changed = NULL;
+    if (ui_menusize)
+        ui_menusize->changed = NULL;
 
     PlayerModel_Free();
 

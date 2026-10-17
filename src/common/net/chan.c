@@ -213,7 +213,7 @@ static int NetchanOld_Transmit(netchan_t *chan, size_t length, const void *data,
 
 #if USE_CLIENT
     // send the qport if we are a client
-    if (chan->sock == NS_CLIENT) {
+    if (chan->sock != NS_SERVER) {
         if (chan->protocol < PROTOCOL_VERSION_R1Q2) {
             SZ_WriteShort(&send, chan->qport);
         } else if (chan->qport) {
@@ -388,7 +388,7 @@ int Netchan_TransmitNextFragment(netchan_t *chan)
 
 #if USE_CLIENT
     // send the qport if we are a client
-    if (chan->sock == NS_CLIENT && chan->qport) {
+    if (chan->sock != NS_SERVER && chan->qport) {
         SZ_WriteByte(&send, chan->qport);
     }
 #endif
@@ -504,7 +504,7 @@ static int NetchanNew_Transmit(netchan_t *chan, size_t length, const void *data,
 
 #if USE_CLIENT
     // send the qport if we are a client
-    if (chan->sock == NS_CLIENT && chan->qport) {
+    if (chan->sock != NS_SERVER && chan->qport) {
         SZ_WriteByte(&send, chan->qport);
     }
 #endif

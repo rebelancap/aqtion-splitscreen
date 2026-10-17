@@ -289,6 +289,13 @@ static void set_active_state(void)
         }
     }
 
+    // splitscreen: nothing shared to do for an extra player
+    if (cla->playerNum) {
+        SCR_LagClear();
+        CL_SplitActive();
+        return;
+    }
+
     SCR_EndLoadingPlaque();     // get rid of loading plaque
     SCR_LagClear();
     Con_Close(false);           // get rid of connection screen
@@ -419,6 +426,10 @@ void CL_DeltaFrame(void)
         parse_entity_event(cl.entityStates[j].number);
     }
 
+    // splitscreen: demo, GTV and mouse grab are player 1's
+    if (cla->playerNum)
+        goto extra;
+
     if (cls.demo.recording && !cls.demo.paused && !cls.demo.seeking && CL_FRAMESYNC) {
         CL_EmitDemoFrame();
     }
@@ -438,6 +449,7 @@ void CL_DeltaFrame(void)
         IN_Activate();
     }
 
+extra:
     check_player_lerp(&cl.oldframe, &cl.frame, 1);
 
 #if USE_FPS
@@ -1501,6 +1513,12 @@ void CL_CalcViewValues(void)
     cl.playerEntityAngles[PITCH] = cl.playerEntityAngles[PITCH] / 3;
 
     VectorAdd(cl.refdef.vieworg, viewoffset, cl.refdef.vieworg);
+
+    // splitscreen: players 2..8 are extra listeners (nearest wins on DMA)
+    if (cla->playerNum) {
+        S_SplitSetListener(cla->playerNum, cl.refdef.vieworg, cl.v_right);
+        return;
+    }
 
     VectorCopy(cl.refdef.vieworg, listener_origin);
     VectorCopy(cl.v_forward, listener_forward);

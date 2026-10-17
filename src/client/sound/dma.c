@@ -644,7 +644,8 @@ SpatializeOrigin
 Used for spatializing channels and autosounds
 =================
 */
-static void SpatializeOrigin(const vec3_t origin, float master_vol, float dist_mult, float *left_vol, float *right_vol)
+static void SpatializeFrom(const vec3_t origin, const vec3_t lorigin, const vec3_t lright,
+                           float master_vol, float dist_mult, float *left_vol, float *right_vol)
 {
     vec_t       dot;
     vec_t       dist;
@@ -652,7 +653,7 @@ static void SpatializeOrigin(const vec3_t origin, float master_vol, float dist_m
     vec3_t      source_vec;
 
 // calculate stereo seperation and distance attenuation
-    VectorSubtract(origin, listener_origin, source_vec);
+    VectorSubtract(origin, lorigin, source_vec);
 
     dist = VectorNormalize(source_vec);
     dist -= SOUND_FULLVOLUME;
@@ -664,7 +665,7 @@ static void SpatializeOrigin(const vec3_t origin, float master_vol, float dist_m
         rscale = 1.0f;
         lscale = 1.0f;
     } else {
-        dot = DotProduct(listener_right, source_vec);
+        dot = DotProduct(lright, source_vec);
         rscale = 0.5f * (1.0f + dot);
         lscale = 0.5f * (1.0f - dot);
     }
@@ -683,28 +684,133 @@ static void SpatializeOrigin(const vec3_t origin, float master_vol, float dist_m
 
 /*
 =================
+SpatializeOrigin
+
+Splitscreen (design 6): the loudest = nearest of player 1's and the other
+players' listeners wins; mono with 3+ players (s_splitPan). Returns the
+player it is heard from (0 = player 1).
+=================
+*/
+static int SpatializeOrigin(const vec3_t origin, float master_vol, float dist_mult, float *left_vol, float *right_vol)
+{
+    const s_split_listener_t *l;
+    float left, right;
+    int i, player = 0;
+
+    SpatializeFrom(origin, listener_origin, listener_right, master_vol, dist_mult, left_vol, right_vol);
+    if (!s_split_numlisteners)
+        return 0;
+
+    for (i = 0, l = s_split_listeners; i < s_split_numlisteners; i++, l++) {
+        SpatializeFrom(origin, l->origin, l->right, master_vol, dist_mult, &left, &right);
+        if (left + right > *left_vol + *right_vol) {
+            *left_vol = left;
+            *right_vol = right;
+            player = l->player;
+        }
+    }
+    if (S_SplitMono())
+        *left_vol = *right_vol = (*left_vol + *right_vol) * 0.5f;
+    return player;
+}
+
+/*
+=================
 DMA_Spatialize
 =================
 */
-static void DMA_Spatialize(channel_t *ch)
+static int DMA_Spatialize_(channel_t *ch, vec3_t origin)
 {
-    vec3_t      origin;
-
     // anything coming from the view entity will always be full volume
     // no attenuation = no spatialization
     if (S_IsFullVolume(ch)) {
         ch->leftvol = ch->master_vol;
         ch->rightvol = ch->master_vol;
-        return;
+        return -1;
     }
 
     if (ch->fixed_origin) {
         VectorCopy(ch->origin, origin);
     } else {
-        CL_GetEntitySoundOrigin(ch->entnum, origin);
+        S_GetChannelOrigin(ch, origin);
     }
 
-    SpatializeOrigin(origin, ch->master_vol, ch->dist_mult, &ch->leftvol, &ch->rightvol);
+    return SpatializeOrigin(origin, ch->master_vol, ch->dist_mult, &ch->leftvol, &ch->rightvol);
+}
+
+static void DMA_Spatialize(channel_t *ch)
+{
+    vec3_t      origin;
+
+    DMA_Spatialize_(ch, origin);
+}
+
+// a new channel (S_IssuePlaysound)
+static void DMA_PlayChannel(channel_t *ch)
+{
+    vec3_t      origin;
+    int         player = DMA_Spatialize_(ch, origin);
+
+    if (s_split_numents)
+        S_SplitLogChannel(ch, player, origin);
+}
+
+/*
+==================
+AddSplitLoopSounds
+
+AddLoopSounds while players 2..8 are in the game: the loop sounds of every
+player's view (S_SplitLoopSounds), each from the nearest listener.
+==================
+*/
+static void AddSplitLoopSounds(void)
+{
+    int         i, j, count;
+    float       left, right, left_total, right_total;
+    s_split_loop_t *loops = S_SplitLoopSounds(&count);
+    channel_t   *ch;
+    sfx_t       *sfx;
+    sfxcache_t  *sc;
+
+    for (i = 0; i < count; i++) {
+        if (!loops[i].sound)
+            continue;
+
+        sfx = S_SfxForHandle(cl.sound_precache[loops[i].sound]);
+        if (!sfx)
+            continue;       // bad sound effect
+        sc = sfx->cache;
+        if (!sc)
+            continue;
+
+        // find the total contribution of all sounds of this type
+        SpatializeOrigin(loops[i].origin, loops[i].volume, loops[i].dist_mult, &left_total, &right_total);
+        for (j = i + 1; j < count; j++) {
+            if (loops[j].sound != loops[i].sound)
+                continue;
+            loops[j].sound = 0;     // don't check this again later
+            SpatializeOrigin(loops[j].origin, loops[j].volume, loops[j].dist_mult, &left, &right);
+            left_total += left;
+            right_total += right;
+        }
+
+        if (left_total == 0 && right_total == 0)
+            continue;       // not audible
+
+        // allocate a channel
+        ch = S_PickChannel(0, 0);
+        if (!ch)
+            return;
+
+        ch->leftvol = min(left_total, 1.0f);
+        ch->rightvol = min(right_total, 1.0f);
+        ch->master_vol = loops[i].volume;
+        ch->dist_mult = loops[i].dist_mult;     // for S_IsFullVolume()
+        ch->autosound = true;   // remove next frame
+        ch->sfx = sfx;
+        ch->pos = s_paintedtime % sc->length;
+        ch->end = s_paintedtime + sc->length - ch->pos;
+    }
 }
 
 /*
@@ -730,6 +836,11 @@ static void AddLoopSounds(void)
 
     if (cls.state != ca_active || !s_active || sv_paused->integer || !s_ambient->integer)
         return;
+
+    if (s_split_numents) {
+        AddSplitLoopSounds();
+        return;
+    }
 
     S_BuildSoundList(sounds);
 
@@ -899,7 +1010,7 @@ const sndapi_t snd_dma = {
     .need_raw_samples = DMA_NeedRawSamples,
     .drop_raw_samples = DMA_DropRawSamples,
     .get_begin_ofs = DMA_DriftBeginofs,
-    .play_channel = DMA_Spatialize,
+    .play_channel = DMA_PlayChannel,
     .stop_all_sounds = DMA_ClearBuffer,
     .get_sample_rate = DMA_GetSampleRate,
 };

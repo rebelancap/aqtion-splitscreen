@@ -52,6 +52,11 @@ client_src = [
   'src/client/predict.c',
   'src/client/refresh.c',
   'src/client/screen.c',
+  'src/client/split/split.c',
+  'src/client/split/split_menu.c',
+  'src/client/split/split_profile.c',
+  'src/client/split/split_snd.c',
+  'src/client/split/split_view.c',
   'src/client/sound/main.c',
   'src/client/sound/mem.c',
   'src/client/tent.c',
@@ -389,6 +394,31 @@ if sdl2.found()
   config.set('USE_SDL', 'USE_CLIENT')
 endif
 
+# Gamepads (splitscreen fork): SDL2 joystick/gamecontroller only. Reuses the
+# engine's SDL2 when the sdl2 video option found one; otherwise a separate
+# lookup whose fallback (subprojects/sdl2.wrap) is built static without
+# SDL's video/audio/render subsystems, so vid_drivers is unchanged.
+if get_option('gamepad').disabled()
+  gamepad = dependency('', required: false)
+elif sdl2.found()
+  gamepad = sdl2
+else
+  gamepad = dependency('sdl2',
+    version:         '>= 2.0.18',
+    required:        get_option('gamepad'),
+    default_options: fallback_opt + [
+      'test=false',
+      'use_video=disabled',
+      'use_audio=disabled',
+      'use_render=disabled',
+    ],
+  )
+endif
+if gamepad.found()
+  client_src += 'src/client/split/in_gamepad.c'
+endif
+config.set10('USE_GAMEPAD', gamepad.found())
+
 curl = dependency('libcurl',
   version:         '>= 7.68.0',
   required:        get_option('libcurl'),
@@ -402,6 +432,9 @@ endif
 
 common_deps = [zlib]
 client_deps = [png, curl, sdl2]
+if gamepad.found() and not sdl2.found()
+  client_deps += gamepad
+endif
 server_deps = []
 game_deps = [zlib]
 
@@ -653,7 +686,26 @@ shared_library('game' + cpu, action_src,
   override_options:      get_option('game-build-options'),
 )
 
-config.set('REVISION',            meson.project_version().substring(1).split('~')[0].to_int())
+# Version resource: upstream versions look like r<rev>~<sha>; a VERSION file
+# (splitscreen fork dev builds) holds a dotted a.b.c.d instead.
+_ver = meson.project_version()
+if _ver.startswith('r')
+  _rev = _ver.substring(1).split('~')[0].to_int()
+  _ver_rc = ['@0@'.format(_rev), '0', '0', '0']
+else
+  _rev = 0
+  _ver_rc = []
+  foreach _p : _ver.split('-')[0].split('.')
+    if _ver_rc.length() < 4
+      _ver_rc += '@0@'.format(_p.to_int())
+    endif
+  endforeach
+  foreach _i : range(4 - _ver_rc.length())
+    _ver_rc += '0'
+  endforeach
+endif
+config.set('REVISION',            _rev)
+config.set('VERSION_RC',          ','.join(_ver_rc))
 config.set_quoted('VERSION',      meson.project_version())
 config.set_quoted('CPUSTRING',    cpu)
 config.set_quoted('BUILDSTRING',  sys)

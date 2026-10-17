@@ -3700,6 +3700,29 @@ void FS_Shutdown(void)
     Cmd_Deregister(c_fs);
 }
 
+#if USE_CLIENT
+/*
+================
+FS_FirstRunDefaults
+
+splitscreen: the first start of an install (no saved config) is fullscreen
+at the desktop resolution (vid_fullscreen 1 = the first vid_modelist entry,
+"desktop": a borderless window, no mode change), whatever default.cfg says.
+q2config.cfg, autoexec.cfg and +set on the command line come after this.
+================
+*/
+static void FS_FirstRunDefaults(void)
+{
+    const char *modelist = Cvar_VariableString("vid_modelist");
+
+    if (Cvar_VariableInteger("vid_fullscreen") != 1)
+        Cvar_Set("vid_fullscreen", "1");
+    if (*modelist && Q_strncasecmp(modelist, "desktop", 7))
+        Cvar_Set("vid_modelist", va("desktop %s", modelist));
+    Com_Printf("First run (no %s yet): fullscreen at the desktop resolution.\n", COM_CONFIG_CFG);
+}
+#endif
+
 /*
 ================
 FS_AddConfigFiles
@@ -3715,7 +3738,14 @@ void FS_AddConfigFiles(bool init)
     // default.cfg may come from packfile, but config.cfg and autoexec.cfg
     // must be real files within the game directory.
     Com_AddConfigFile(COM_DEFAULT_CFG, flag);
-    Com_AddConfigFile(COM_CONFIG_CFG, FS_TYPE_REAL | flag);
+    // splitscreen: with a homedir, the saved config is the one there only,
+    // never a stale q2config.cfg in the install's game folder; none there
+    // means a first run
+#if USE_CLIENT
+    if (init && !FS_FileExistsEx(COM_CONFIG_CFG, FS_TYPE_REAL | FS_DIR_HOME))
+        FS_FirstRunDefaults();
+#endif
+    Com_AddConfigFile(COM_CONFIG_CFG, FS_TYPE_REAL | FS_DIR_HOME | flag);
 
     // autoexec.cfg is executed twice, first from basedir and then from
     // gamedir. This ensures user settings configured in baseq2/autoexec.cfg

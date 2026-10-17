@@ -20,6 +20,7 @@ with this program; if not, write to the Free Software Foundation, Inc.,
 #include "client.h"
 #include "common/math.h"
 #include "../refresh/images.h"
+#include "split/gamepad.h"
 
 #define STAT_PICS       11
 #define STAT_MINUS      (STAT_PICS - 1)  // num frame for '-' stats digit
@@ -61,8 +62,10 @@ static struct {
     int         hud_width, hud_height;
     float       hud_scale;
     int         lag_draw_scale;
-    qboolean    currently_scoped_in;
 } scr;
+
+// per player context (client_context_t)
+#define scr_currently_scoped_in (cla->scr.currently_scoped_in)
 
 static cvar_t   *scr_viewsize;
 static cvar_t   *scr_centertime;
@@ -131,7 +134,88 @@ static cvar_t   *scr_hit_marker_time;
 
 static cvar_t   *ch_hide_while_zoomed;
 
+// splitscreen fork (0.0.0.25), per player through p<N>_ like the above
+static cvar_t   *ch_size;           // crosshair size, times ch_scale's (default 3x)
+static cvar_t   *scr_textsize;      // cl_splitTextSize: chat / centre text in a cell
+
+// splitscreen: a player's own HUD settings in its cell (p<N>_<cvar>, set
+// from its overlay Settings page; player 1 and a player without one: the
+// shared cvar)
+static cvar_t *SCR_PlayerVar(cvar_t *base)
+{
+    cvar_t *v;
+
+    if (!base || cla->playerNum <= 0)
+        return base;
+    v = Cvar_FindVar(va("p%d_%s", cla->playerNum + 1, base->name));
+    return v ? v : base;
+}
+
+static float SCR_HudAlpha(void)
+{
+    return Q_clipf(SCR_PlayerVar(scr_alpha)->value, 0, 1);
+}
+
+// the crosshair colour of the cell's player (health colouring stays shared)
+static uint32_t SCR_CrosshairColor(void)
+{
+    color_t c;
+    cvar_t *r, *g, *b, *a;
+
+    if (cla->playerNum <= 0 || ch_health->integer)
+        return scr.crosshair_color.u32;
+    r = SCR_PlayerVar(ch_red);
+    g = SCR_PlayerVar(ch_green);
+    b = SCR_PlayerVar(ch_blue);
+    a = SCR_PlayerVar(ch_alpha);
+    if (r == ch_red && g == ch_green && b == ch_blue && a == ch_alpha)
+        return scr.crosshair_color.u32;
+    c.u8[0] = Q_clipf(r->value, 0, 1) * 255;
+    c.u8[1] = Q_clipf(g->value, 0, 1) * 255;
+    c.u8[2] = Q_clipf(b->value, 0, 1) * 255;
+    c.u8[3] = Q_clipf(a->value, 0, 1) * 255;
+    return c.u32;
+}
+
+// the crosshair picture of the cell's player (p<N>_crosshair; registered
+// once per player and number, the cache is cleared with the media)
+static struct {
+    int         num;
+    qhandle_t   pic;
+} scr_xhpic[MAX_SPLITVIEW];
+
+static qhandle_t SCR_CrosshairPic(void)
+{
+    cvar_t *ch = SCR_PlayerVar(scr_crosshair);
+    int n = cla->playerNum;
+
+    if (ch->integer <= 0)
+        return 0;
+    if (ch == scr_crosshair || n <= 0 || n >= MAX_SPLITVIEW)
+        return scr.crosshair_pic;
+    if (scr_xhpic[n].num != ch->integer) {
+        scr_xhpic[n].num = ch->integer;
+        scr_xhpic[n].pic = R_RegisterPic(va("ch%i", ch->integer));
+    }
+    return scr_xhpic[n].pic;
+}
+
+// its size: upstream's ch_scale picture size (half the picture at 1) times
+// the player's ch_size; the scope keeps ch_scale alone
+static void SCR_CrosshairSize(qhandle_t pic, int *w, int *h)
+{
+    float scale = Q_clipf(ch_scale->value, 0.1f, 9.0f) / 2.0f *
+                  Q_clipf(SCR_PlayerVar(ch_size)->value, 0.25f, 4.0f);
+
+    R_GetPicSize(w, h, pic);
+    *w = max(1, Q_rint(*w * scale));
+    *h = max(1, Q_rint(*h * scale));
+}
+
+static float SCR_TextScale(void);    // a cell's chat / centre text (below)
+
 vrect_t     scr_vrect;      // position of render window on screen
+vrect_t     scr_cell;       // current splitscreen cell, window pixels
 
 const uint32_t colorTable[8] = {
     U32_BLACK, U32_RED, U32_GREEN, U32_YELLOW,
@@ -515,18 +599,12 @@ CENTER PRINTING
 ===============================================================================
 */
 
-#define MAX_CENTERPRINTS_REAL   4
 #define MAX_CENTERPRINTS        (cl.csr.extended ? MAX_CENTERPRINTS_REAL : 1)
 
-typedef struct {
-    char        string[MAX_STRING_CHARS - 8];
-    uint32_t    start;
-    uint16_t    lines;
-    uint16_t    typewrite;  // msec to typewrite (0 if instant)
-} centerprint_t;
-
-static centerprint_t    scr_centerprints[MAX_CENTERPRINTS_REAL];
-static unsigned         scr_centerhead, scr_centertail;
+// centerprint_t is in client.h; the queue is per player context
+#define scr_centerprints    (cla->scr.centerprints)
+#define scr_centerhead      (cla->scr.centerhead)
+#define scr_centertail      (cla->scr.centertail)
 
 void SCR_ClearCenterPrints(void)
 {
@@ -579,9 +657,11 @@ void SCR_CenterPrint(const char *str, bool typewrite)
         cp->typewrite = min(nb_chars * 1000 / scr_printspeed->value + 300, 30000);
     }
 
-    // echo it to the console
-    Com_Printf("%s\n", cp->string);
-    Con_ClearNotify_f();
+    // echo it to the console (splitscreen: player 1's only)
+    if (!cla->playerNum) {
+        Com_Printf("%s\n", cp->string);
+        Con_ClearNotify_f();
+    }
 
     scr_centerhead++;
     if (scr_centerhead - scr_centertail > MAX_CENTERPRINTS)
@@ -591,8 +671,8 @@ void SCR_CenterPrint(const char *str, bool typewrite)
 static void SCR_DrawCenterString(void)
 {
     centerprint_t *cp;
-    int y, flags;
-    float alpha;
+    int y, flags, w, h;
+    float alpha, ts;
     size_t maxlen;
 
     if (!scr_centertime->integer) {
@@ -612,9 +692,19 @@ static void SCR_DrawCenterString(void)
         scr_centertail++;
     }
 
-    R_SetAlpha(alpha * scr_alpha->value);
+    R_SetAlpha(alpha * SCR_HudAlpha());
 
-    y = scr.hud_height / 4 - cp->lines * CONCHAR_HEIGHT / 2;
+    // splitscreen: the cell player's text size (SCR_TextScale)
+    ts = SCR_TextScale();
+    w = scr.hud_width;
+    h = scr.hud_height;
+    if (ts != scr.hud_scale) {
+        R_SetScale(ts);
+        w = Q_rint(w * ts / scr.hud_scale);
+        h = Q_rint(h * ts / scr.hud_scale);
+    }
+
+    y = h / 4 - cp->lines * CONCHAR_HEIGHT / 2;
     flags = UI_CENTER;
 
     if (cp->typewrite) {
@@ -624,10 +714,12 @@ static void SCR_DrawCenterString(void)
         maxlen = MAX_STRING_CHARS;
     }
 
-    SCR_DrawStringMulti(scr.hud_width / 2, y, flags,
+    SCR_DrawStringMulti(w / 2, y, flags,
                         maxlen, cp->string, scr.font_pic);
 
-    R_SetAlpha(scr_alpha->value);
+    if (ts != scr.hud_scale)
+        R_SetScale(scr.hud_scale);
+    R_SetAlpha(SCR_HudAlpha());
 }
 
 static void scr_centertime_changed(cvar_t *self)
@@ -646,7 +738,6 @@ LAGOMETER
 ===============================================================================
 */
 
-#define LAG_WIDTH 48
 #define LAG_HEIGHT 48
 int DRAW_LAG_WIDTH;
 int DRAW_LAG_HEIGHT;
@@ -663,10 +754,7 @@ void init_lag_graph_dimensions(void) {
 #define LAG_WARN    0xDC
 #define LAG_CRIT    0xF2
 
-static struct {
-    unsigned samples[LAG_WIDTH];
-    unsigned head;
-} lag;
+#define lag (cla->scr.lag)  // per player context (scr_lag_t, client.h)
 
 void SCR_LagClear(void)
 {
@@ -980,7 +1068,7 @@ static void SCR_DrawObjects(void)
         }
         if (!(obj->flags & UI_IGNORECOLOR)) {
             R_ClearColor();
-            R_SetAlpha(scr_alpha->value);
+            R_SetAlpha(SCR_HudAlpha());
         }
     }
 }
@@ -993,17 +1081,39 @@ CHAT HUD
 ===============================================================================
 */
 
-#define MAX_CHAT_TEXT       150
-#define MAX_CHAT_LINES      32
 #define CHAT_LINE_MASK      (MAX_CHAT_LINES - 1)
 
-typedef struct {
-    char        text[MAX_CHAT_TEXT];
-    unsigned    time;
-} chatline_t;
+static bool     scr_in_cells;       // SCR_DrawCells is drawing the cells
 
-static chatline_t   scr_chatlines[MAX_CHAT_LINES];
-static unsigned     scr_chathead;
+/*
+Text size in a cell (splitscreen fork, 0.0.0.25): the chat HUD, centre
+prints and player 1's notify lines of a cell are drawn cl_splitTextSize
+(p<N>_ per player) times larger than the cell's HUD scale, as long as the
+cell keeps SCR_TEXT_MIN_WIDTH virtual pixels (52 columns: Action's MOTD
+lines fit); never smaller than the HUD. One view (no cells): upstream
+unchanged.
+*/
+#define SCR_TEXT_MIN_WIDTH  416
+
+static float SCR_TextScaleFor(float hud_scale, int width, const cvar_t *size)
+{
+    float s = hud_scale / Q_clipf(size ? size->value : 1, 1, 4);
+
+    if (width > 0 && width * s < SCR_TEXT_MIN_WIDTH)
+        s = (float)SCR_TEXT_MIN_WIDTH / width;
+    return min(s, hud_scale);
+}
+
+static float SCR_TextScale(void)
+{
+    if (!scr_in_cells)
+        return scr.hud_scale;
+    return SCR_TextScaleFor(scr.hud_scale, scr_cell.width, SCR_PlayerVar(scr_textsize));
+}
+
+// chatline_t is in client.h; the chat HUD is per player context
+#define scr_chatlines       (cla->scr.chatlines)
+#define scr_chathead        (cla->scr.chathead)
 
 void SCR_ClearChatHUD_f(void)
 {
@@ -1028,11 +1138,18 @@ void SCR_AddToChatHUD(const char *text)
 static void SCR_DrawChatHUD(void)
 {
     int x, y, i, lines, flags, step;
-    float alpha;
+    float alpha, ts, f;
     chatline_t *line;
 
     if (scr_chathud->integer == 0)
         return;
+
+    // splitscreen: the cell player's text size; positions are worked out in
+    // HUD units as upstream and drawn at the text scale (f = 1: unchanged)
+    ts = SCR_TextScale();
+    f = ts / scr.hud_scale;
+    if (f != 1)
+        R_SetScale(ts);
 
     x = scr_chathud_x->integer + scr.hud_x;
     y = scr_chathud_y->integer + scr.hud_y;
@@ -1048,17 +1165,38 @@ static void SCR_DrawChatHUD(void)
     } else {
         flags |= UI_LEFT;
     }
+    x = Q_rint(x * f);
 
     if (y < 0) {
-        y += scr.hud_height - CONCHAR_HEIGHT + 1;
+        y = Q_rint((y + scr.hud_height) * f) - CONCHAR_HEIGHT + 1;
         step = -CONCHAR_HEIGHT;
     } else {
+        y = Q_rint(y * f);
         step = CONCHAR_HEIGHT;
     }
 
     lines = scr_chathud_lines->integer;
     if (lines > scr_chathead)
         lines = scr_chathead;
+
+    // splitscreen: in a short cell the chat would run into a layout
+    // (scoreboard, Action's menus; a 320x240 box in the cell's centre) or
+    // the inventory. Then it goes bottom-left above the status bar numbers
+    // (yb -24) and keeps only the lines below that box. Same rule in every
+    // cell; nothing changes with one view or without a layout up.
+    if (scr_in_cells && lines > 0 &&
+        (cl.frame.ps.stats[STAT_LAYOUTS] & (LAYOUTS_LAYOUT | LAYOUTS_INVENTORY))) {
+        int box_top = Q_rint((scr.hud_y + (scr.hud_height - 240) / 2) * f);
+        int box_bottom = Q_rint((scr.hud_y + (scr.hud_height + 240) / 2) * f);
+        int top = min(y, y + step * (lines - 1));
+        int bottom = max(y, y + step * (lines - 1)) + CONCHAR_HEIGHT;
+
+        if (top < box_bottom && bottom > box_top) {
+            y = Q_rint((scr.hud_y + scr.hud_height - 32) * f) - CONCHAR_HEIGHT;
+            step = -CONCHAR_HEIGHT;
+            lines = y < box_bottom ? 0 : min(lines, (y - box_bottom) / CONCHAR_HEIGHT + 1);
+        }
+    }
 
     for (i = 0; i < lines; i++) {
         line = &scr_chatlines[(scr_chathead - i - 1) & CHAT_LINE_MASK];
@@ -1068,15 +1206,18 @@ static void SCR_DrawChatHUD(void)
             if (!alpha)
                 break;
 
-            R_SetAlpha(alpha * scr_alpha->value);
+            R_SetAlpha(alpha * SCR_HudAlpha());
             SCR_DrawString(x, y, flags, line->text);
-            R_SetAlpha(scr_alpha->value);
+            R_SetAlpha(SCR_HudAlpha());
         } else {
             SCR_DrawString(x, y, flags, line->text);
         }
 
         y += step;
     }
+
+    if (f != 1)
+        R_SetScale(scr.hud_scale);
 }
 
 /*
@@ -1451,6 +1592,7 @@ void SCR_RegisterMedia(void)
     scr.hit_marker_pic = R_RegisterImage("marker", IT_PIC, IF_PERMANENT | IF_OPTIONAL);
 
     scr_crosshair_changed(scr_crosshair);
+    memset(scr_xhpic, 0, sizeof(scr_xhpic));
     scr_font_changed(scr_font);
 }
 
@@ -1546,6 +1688,8 @@ void SCR_Init(void)
     ch_scale->changed = ch_scale_changed;
     ch_x = Cvar_Get("ch_x", "0", 0);
     ch_y = Cvar_Get("ch_y", "0", 0);
+    ch_size = Cvar_Get("ch_size", "3", CVAR_ARCHIVE);
+    scr_textsize = Cvar_Get("cl_splitTextSize", "2", CVAR_ARCHIVE);
 
     ch_hide_while_zoomed = Cvar_Get("ch_hide_while_zoomed", "1", 0);
 
@@ -1958,7 +2102,7 @@ static void SCR_ExecuteLayoutString(const char *s)
             continue;
         }
         //save whether we parsed a scope pic
-        scr.currently_scoped_in = parsed_scope_pic;
+        scr_currently_scoped_in = parsed_scope_pic;
         if (!strcmp(token, "client")) {
             // draw a deathmatch client block
             int     score, ping, time;
@@ -2202,7 +2346,7 @@ static void SCR_ExecuteLayoutString(const char *s)
 
             token = COM_Parse(&s);
             if (SCR_ParseColor(token, &color)) {
-                color.u8[3] *= scr_alpha->value;
+                color.u8[3] *= SCR_HudAlpha();
                 R_SetColor(color.u32);
             }
             continue;
@@ -2230,7 +2374,7 @@ static void SCR_ExecuteLayoutString(const char *s)
     }
 
     R_ClearColor();
-    R_SetAlpha(scr_alpha->value);
+    R_SetAlpha(SCR_HudAlpha());
 }
 
 //=============================================================================
@@ -2291,7 +2435,10 @@ typedef struct {
 #define XHAIR_MAX_LENGTH 648
 #define XHAIR_FAST_TRANS_GAP 200
 #define XHAIR_FAST_TRANS_LENGTH 50
-static float deltatime_factor = 0.001;
+// SCR_DrawXhair animation state is per player context (cl_scr_t)
+#define deltatime_factor    (cla->scr.xh_deltatime_factor)
+#define last_rtime          (cla->scr.xh_last_rtime)
+#define spray               (cla->scr.xh_spray)
 
 static xhair_weapon_cfg_t xhair_weapon_cfgs[9] = {
     {"models/weapons/v_m4/tris.md2", 5, 2.35, 0.6, 12, 11, 1.1},
@@ -2351,7 +2498,6 @@ static int XHAIR_WeaponIsFiring(int wep_index) {
 }
 
 static xhair_state_t XHAIR_ApplyFiringInaccuracy(xhair_state_t xh, int wep_index) {
-    static int spray = 0;
     if (spray > 0) {
         spray -= 1800*deltatime_factor;
     }
@@ -2371,10 +2517,9 @@ static xhair_state_t XHAIR_ApplyFiringInaccuracy(xhair_state_t xh, int wep_index
 // mikota's xhair
 static void SCR_DrawXhair(void) {
     //Con_Printf("deltatime_factor: %g\n",deltatime_factor);
-    R_SetColor(scr.crosshair_color.u32);
+    R_SetColor(SCR_CrosshairColor());
     //Con_Printf("%f",scr.hud_scale);
     R_SetScale(1.0f); 
-    static int last_rtime = 0;
     deltatime_factor = (float)((cls.realtime-last_rtime)/2 + 4)*0.001;
     //deltatime_factor = 0.001;
     deltatime_factor /= 4;
@@ -2382,18 +2527,18 @@ static void SCR_DrawXhair(void) {
     if (deltatime_ms > 8) deltatime_ms = 8;
    // Con_Printf("%d ",deltatime_ms);
     last_rtime = cls.realtime;
-    int xh_center_x = r_config.width/2 - xhair_thickness->integer/2;
-    int xh_center_y = r_config.height/2 - xhair_thickness->integer/2;
+    int xh_center_x = scr_cell.width/2 - xhair_thickness->integer/2;
+    int xh_center_y = scr_cell.height/2 - xhair_thickness->integer/2;
     if (xhair_dot->integer) {
         R_DrawFill32(xh_center_x+xhair_x->integer,
             xh_center_y+xhair_y->integer,
             xhair_thickness->integer,
             xhair_thickness->integer,
-            scr.crosshair_color.u32);
+            SCR_CrosshairColor());
     }
-    static float gap = 5;
-    static float length = 4;
-    static float xh_elasticity = 0.04;
+    float gap = cla->scr.xh_gap;                // per player, was static
+    float length = cla->scr.xh_length;
+    float xh_elasticity = cla->scr.xh_elasticity;
     xhair_state_t xh;
     xh.gap = xhair_gap->integer;
     xh.length = xhair_length->integer;
@@ -2430,6 +2575,9 @@ static void SCR_DrawXhair(void) {
         if (fabs(gap - xh.gap) > XHAIR_FAST_TRANS_GAP) gap = xh.gap;
         if (fabs(length - xh.length) > XHAIR_FAST_TRANS_LENGTH) length = xh.length;
     }
+    cla->scr.xh_gap = gap;
+    cla->scr.xh_length = length;
+    cla->scr.xh_elasticity = xh_elasticity;
 
     int rgap = (int)(round(gap));
     int rlength = (int)(round(length));
@@ -2460,7 +2608,7 @@ static void SCR_DrawXhair(void) {
                 xh_w = rem ? xhair_thickness->integer : rlength;
             }
             R_DrawFill32(xh_x,xh_y,
-                xh_w,xh_h,scr.crosshair_color.u32);
+                xh_w,xh_h,SCR_CrosshairColor());
         }
     } 
     R_SetScale(scr.hud_scale);
@@ -2498,25 +2646,26 @@ static void SCR_DrawCrosshair(void)
         return;
     }
 
-    int x, y;
+    int x, y, w, h;
+    qhandle_t pic;
 
-    if (!scr_crosshair->integer)
+    // splitscreen: the cell player's picture and size (p<N>_crosshair / ch_size)
+    if (!(pic = SCR_CrosshairPic()))
         return;
     if (cl.frame.ps.stats[STAT_LAYOUTS] & (LAYOUTS_HIDE_HUD | LAYOUTS_HIDE_CROSSHAIR))
         return;
-    if (scr.currently_scoped_in && ch_hide_while_zoomed->integer)
+    if (scr_currently_scoped_in && ch_hide_while_zoomed->integer)
         return;
 
-    x = (scr.hud_width - scr.crosshair_width) / 2;
-    y = (scr.hud_height - scr.crosshair_height) / 2;
+    SCR_CrosshairSize(pic, &w, &h);
+    x = (scr.hud_width - w) / 2;
+    y = (scr.hud_height - h) / 2;
 
-    R_SetColor(scr.crosshair_color.u32);
+    R_SetColor(SCR_CrosshairColor());
 
     R_DrawStretchPic(x + ch_x->integer,
                      y + ch_y->integer,
-                     scr.crosshair_width,
-                     scr.crosshair_height,
-                     scr.crosshair_pic);
+                     w, h, pic);
 
     SCR_DrawHitMarker();
 }
@@ -2594,7 +2743,7 @@ static void SCR_DrawGhud(void)
     int x, y;
     int i;
 
-    float alpha_base = Cvar_ClampValue(scr_alpha, 0, 1);
+    float alpha_base = SCR_HudAlpha();
     color_t color_base;
     color_base.u32 = 0xFFFFFFFF;
 
@@ -2783,12 +2932,13 @@ static void SCR_Draw2D(void)
 
     // the rest of 2D elements share common alpha
     R_ClearColor();
-    R_SetAlpha(Cvar_ClampValue(scr_alpha, 0, 1));
+    R_SetAlpha(SCR_HudAlpha());
 
-    if (scr_timegraph->integer)
+    // debug graphs: once per frame, in player 1's cell
+    if (scr_timegraph->integer && !cla->playerNum)
         SCR_DebugGraph(cls.frametime * 300, 0xdc);
 
-    if (scr_debuggraph->integer || scr_timegraph->integer || scr_netgraph->integer)
+    if ((scr_debuggraph->integer || scr_timegraph->integer || scr_netgraph->integer) && !cla->playerNum)
         SCR_DrawDebugGraph();
 
     SCR_DrawStats();
@@ -2800,7 +2950,7 @@ static void SCR_Draw2D(void)
 
     // gotta redo the colors because the ghud messes with them, sadly.
     R_ClearColor();
-    R_SetAlpha(Cvar_ClampValue(scr_alpha, 0, 1));
+    R_SetAlpha(SCR_HudAlpha());
 #endif
     SCR_DrawInventory();
 
@@ -2835,7 +2985,7 @@ static void SCR_DrawActive(void)
 
     // draw black background if not active
     if (cls.state < ca_active) {
-        R_DrawFill8(0, 0, r_config.width, r_config.height, 0);
+        R_DrawFill8(0, 0, scr_cell.width, scr_cell.height, 0);
         return;
     }
 
@@ -2844,9 +2994,9 @@ static void SCR_DrawActive(void)
         return;
     }
 
-    // start with full screen HUD
-    scr.hud_height = r_config.height;
-    scr.hud_width = r_config.width;
+    // start with full cell HUD
+    scr.hud_height = scr_cell.height;
+    scr.hud_width = scr_cell.width;
 
     SCR_DrawDemo();
 
@@ -2856,10 +3006,242 @@ static void SCR_DrawActive(void)
     SCR_TileClear();
 
     // draw 3D game view
+    CL_SplitPerfMark(SPLIT_PERF_SCENE);
     V_RenderView();
 
     // draw all 2D elements
     SCR_Draw2D();
+    CL_SplitPerfMark(SPLIT_PERF_NONE);
+}
+
+/*
+=================
+Splitscreen cells
+
+One cell per local player in use (layout in split/split_view.c). Each cell
+is drawn with that player's context active, exactly like the one-player
+path, into its own 2D draw rect; console, menus and the loading plaque stay
+full screen. Pushes relative to the caller (this can run inside an extra's
+processing) and restores it; runs no network or command code.
+=================
+*/
+
+// cells unless player 1 plays a cinematic (full screen)
+static bool SCR_SplitCells(void)
+{
+    const client_context_t *p1 = clx[0];
+
+    return (p1 == cla ? cls.state : p1->conn.state) != ca_cinematic;
+}
+
+/*
+Auto HUD scale for the cell (scr_scale 0; an explicit scr_scale applies to
+every cell unchanged). The window's auto rule applied to the cell size,
+never above the window's (integer magnification). Then fit to the cell
+(design 3.4 item 1, M4): Q2 layouts and Action's scoreboards / menus are
+laid out for a screen at least 640 virtual pixels wide, so a cell that
+would be narrower gets a fractional scale making it exactly that wide
+(soft, smaller text: 320-wide cells draw at half size). The status bar,
+layouts, centerprints, crosshair and chat HUD of the cell all use it.
+*/
+#define SCR_CELL_MIN_WIDTH  640
+
+static float SCR_CellScaleFor(float window_scale, const vrect_t *rc)
+{
+    int k = Q_rint(1.0f / window_scale), c = 1;
+    float scale;
+
+    if (rc->height < rc->width) {
+        if (rc->height >= 2160)
+            c = 4;
+        else if (rc->height >= 1080)
+            c = 2;
+    } else {
+        if (rc->width >= 3840)
+            c = 4;
+        else if (rc->width >= 1920)
+            c = 2;
+    }
+
+    scale = 1.0f / max(1, min(k, c));
+    if (rc->width > 0 && rc->width * scale < SCR_CELL_MIN_WIDTH)
+        scale = (float)SCR_CELL_MIN_WIDTH / rc->width;
+    return scale;
+}
+
+static float SCR_CellScale(float window_scale)
+{
+    return SCR_CellScaleFor(window_scale, &scr_cell);
+}
+
+/*
+SCR_SplitNotifyCell: with 2+ cells, player 1's console notify lines (and
+its chat prompt) are drawn in player 1's cell at that cell's scale (the
+window scale given, through the same rule as the HUD) instead of across
+everyone's view. False = full screen as upstream.
+*/
+bool SCR_SplitNotifyCell(vrect_t *rc, float *scale, float window_scale)
+{
+    const client_context_t *p1 = clx[0];
+
+    if (CL_SplitViewCount() < 2 || !SCR_SplitCells() || !p1 || !p1->inUse)
+        return false;
+    CL_SplitLayout(false);
+    if (p1->cell.width <= 0 || p1->cell.height <= 0)
+        return false;
+    *rc = p1->cell;
+    // at player 1's text size (cl_splitTextSize, 0.0.0.25)
+    *scale = SCR_TextScaleFor(SCR_CellScaleFor(window_scale, rc), rc->width, scr_textsize);
+    return true;
+}
+
+static void SCR_DrawCellStatus(const char *text)
+{
+    int w, h;
+
+    R_SetScale(scr.hud_scale);
+    w = Q_rint(scr_cell.width * scr.hud_scale);
+    h = Q_rint(scr_cell.height * scr.hud_scale);
+    R_ClearColor();
+    SCR_DrawString(w / 2, (h - CONCHAR_HEIGHT) / 2, UI_CENTER | UI_DROPSHADOW, text);
+    R_SetScale(1.0f);
+}
+
+static float    scr_cells_scale;    // window HUD scale while SCR_DrawCells runs
+static int      scr_recursive;
+
+static void SCR_DrawCells(void)
+{
+    float scale = scr.hud_scale;
+    int i;
+
+    CL_SplitLayout(false);
+
+    scr_cells_scale = scale;
+    scr_in_cells = true;
+
+    for (i = 0; i < MAX_SPLITVIEW; i++) {
+        if (!clx[i] || !clx[i]->inUse)
+            continue;
+        if (!CL_SplitPushView(i))
+            continue;
+
+        scr_cell = cla->cell;
+        if (!scr_scale->value)
+            scr.hud_scale = SCR_CellScale(scale);
+        R_SetDrawRect(&scr_cell);
+
+        if (!CL_SplitViewReady()) {
+            R_DrawFill8(0, 0, scr_cell.width, scr_cell.height, 0);
+            SCR_DrawCellStatus(va("Player %d: waiting for player 1", i + 1));
+        } else {
+            SCR_DrawActive();
+            if (i && cls.state < ca_active && UI_IsTransparent())
+                SCR_DrawCellStatus(va("Player %d: %s", i + 1, cls.state < ca_connected ?
+                                      "connecting..." : "loading..."));
+            else if (PAD_CellStatus(i))
+                SCR_DrawCellStatus(PAD_CellStatus(i));
+        }
+
+        CL_PopContext();
+    }
+
+    // splitscreen: a refused / kicked player's reason, in its cell for a while
+    for (i = 1; i < MAX_SPLITVIEW; i++) {
+        const char *notice = CL_SplitCellNotice(i, &scr_cell);
+
+        if (!notice)
+            continue;
+        if (!scr_scale->value)
+            scr.hud_scale = SCR_CellScale(scale);
+        R_SetDrawRect(&scr_cell);
+        R_DrawFill8(0, 0, scr_cell.width, scr_cell.height, 0);
+        SCR_DrawCellStatus(notice);
+    }
+
+    R_SetDrawRect(NULL);
+    scr_cell.x = scr_cell.y = 0;
+    scr_cell.width = r_config.width;
+    scr_cell.height = r_config.height;
+    scr.hud_scale = scale;
+    scr_in_cells = false;
+
+    if (UI_IsTransparent())
+        CL_SplitDrawEmptyCells();
+
+    // a line between the cells (cl_splitBorder)
+    CL_SplitDrawBorders();
+}
+
+/*
+=================
+SCR_DrawJoinHint
+
+Splitscreen pad join hint / refusal (in_gamepad.c), bottom-right of the
+window over the cells, under the menus and console.
+=================
+*/
+static void SCR_DrawJoinHint(void)
+{
+    const char *text, *note = NULL;
+    bool warn = false;
+    float scale = scr.hud_scale;
+    int w, h, x, y, len, lines;
+
+    text = PAD_HintText(&note, &warn);
+    if (!text)
+        return;
+
+    // readable on a shared screen: at least 2x the console font from 720p up
+    if (r_config.height >= 720 && scale > 0.5f)
+        scale = 0.5f;
+    R_SetScale(scale);
+    w = Q_rint(r_config.width * scale);
+    h = Q_rint(r_config.height * scale);
+
+    len = strlen(text);
+    if (note)
+        len = max(len, (int)strlen(note));
+    len *= CONCHAR_WIDTH;
+    lines = note ? 2 : 1;
+    x = w - len - CONCHAR_WIDTH;
+    y = h - (lines + 4) * CONCHAR_HEIGHT;     // above the status bar numbers
+
+    R_DrawFill32(x - 4, y - 4, len + 8, lines * CONCHAR_HEIGHT + 8, MakeColor(0, 0, 0, 160));
+    R_SetColor(warn ? U32_YELLOW : U32_WHITE);
+    R_DrawString(x, y, 0, MAX_STRING_CHARS, text, scr.font_pic);
+    if (note) {
+        R_SetColor(U32_YELLOW);
+        R_DrawString(x, y + CONCHAR_HEIGHT, 0, MAX_STRING_CHARS, note, scr.font_pic);
+    }
+    R_ClearColor();
+    R_SetScale(1.0f);
+}
+
+/*
+==================
+SCR_ResetAfterError
+
+An error trapped by the splitscreen guard (split.c) can longjmp out of a
+SCR_UpdateScreen reached from an extra's work (CL_Changing_f,
+CL_Reconnect_f, CL_PrepRefresh): undo what the unfinished frame left set.
+Guarded work is entered from the frame loop, never from inside
+SCR_UpdateScreen, so the recursion count goes back to 0.
+==================
+*/
+void SCR_ResetAfterError(void)
+{
+    scr_recursive = 0;
+
+    if (scr_in_cells) {
+        scr_in_cells = false;
+        scr.hud_scale = scr_cells_scale;
+        R_SetDrawRect(NULL);
+        R_SetScale(1.0f);
+        scr_cell.x = scr_cell.y = 0;
+        scr_cell.width = r_config.width;
+        scr_cell.height = r_config.height;
+    }
 }
 
 //=======================================================
@@ -2874,7 +3256,6 @@ text to the screen.
 */
 void SCR_UpdateScreen(void)
 {
-    static int recursive;
 
     if (!scr.initialized) {
         return;             // not initialized yet
@@ -2892,19 +3273,32 @@ void SCR_UpdateScreen(void)
         Com_Printf("Loading plaque timed out.\n");
     }
 
-    if (recursive > 1) {
+    if (scr_recursive > 1) {
         Com_Error(ERR_FATAL, "%s: recursively called", __func__);
     }
 
-    recursive++;
+    scr_recursive++;
 
     R_BeginFrame();
 
+    scr_cell.x = scr_cell.y = 0;
+    scr_cell.width = r_config.width;
+    scr_cell.height = r_config.height;
+
     // do 3D refresh drawing
-    SCR_DrawActive();
+    if (CL_SplitViewCount() > 1 && SCR_SplitCells())
+        SCR_DrawCells();
+    else
+        SCR_DrawActive();
+
+    // splitscreen: "Player 2: hold A to join"
+    SCR_DrawJoinHint();
 
     // draw main menu
     UI_Draw(cls.realtime);
+
+    // splitscreen: per-player overlay menus, on-screen keyboards
+    CL_SplitMenuDraw();
 
     // draw console
     Con_DrawConsole();
@@ -2912,7 +3306,10 @@ void SCR_UpdateScreen(void)
     // draw loading plaque
     SCR_DrawLoading();
 
+    CL_SplitPerfMark(SPLIT_PERF_SWAP);
     R_EndFrame();
+    CL_SplitPerfMark(SPLIT_PERF_NONE);
+    CL_SplitPerfFrame();
 
-    recursive--;
+    scr_recursive--;
 }

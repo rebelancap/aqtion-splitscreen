@@ -1710,7 +1710,9 @@ bool GL_ShowErrors(const char *func)
     return true;
 }
 
-static void GL_PostProcess(glStateBits_t bits, int x, int y, int w, int h)
+// s, t: the texture coordinate extent of the source (1 = the whole texture;
+// a splitscreen cell smaller than the post-process FBO uses its bottom-left part)
+static void GL_PostProcess(glStateBits_t bits, int x, int y, int w, int h, float s, float t)
 {
     GL_BindArrays(VA_POSTPROCESS);
     GL_StateBits(GLS_DEPTHTEST_DISABLE | GLS_DEPTHMASK_FALSE |
@@ -1718,43 +1720,65 @@ static void GL_PostProcess(glStateBits_t bits, int x, int y, int w, int h)
     GL_ArrayBits(GLA_VERTEX | GLA_TC);
     gl_backend->load_uniforms();
 
-    Vector4Set(tess.vertices,      x,     y,     0, 1);
+    Vector4Set(tess.vertices,      x,     y,     0, t);
     Vector4Set(tess.vertices +  4, x,     y + h, 0, 0);
-    Vector4Set(tess.vertices +  8, x + w, y,     1, 1);
-    Vector4Set(tess.vertices + 12, x + w, y + h, 1, 0);
+    Vector4Set(tess.vertices +  8, x + w, y,     s, t);
+    Vector4Set(tess.vertices + 12, x + w, y + h, s, 0);
 
     GL_LockArrays(4);
     qglDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
     GL_UnlockArrays();
 }
 
-static void GL_DrawBloom(bool waterwarp)
+static void GL_DrawBloom(bool waterwarp, float ss, float st)
 {
     int iterations = Cvar_ClampInteger(gl_bloom, 1, 8) * 2;
     int w = glr.fd.width / 4;
     int h = glr.fd.height / 4;
+    int bw = max(glr.framebuffer_width / 4, 1);     // blur texture size
+    int bh = max(glr.framebuffer_height / 4, 1);
+    float bs = (float)w / bw;                       // this scene's part of it
+    float bt = (float)h / bh;
+
+    // the draw rect's scissor (window coordinates, set again by GL_Setup2D
+    // below) must not cut the passes into the blur FBOs: it did for every
+    // splitscreen cell but the bottom-left one, which left the other cells
+    // with that cell's bloom
+    if (draw.scissor) {
+        qglDisable(GL_SCISSOR_TEST);
+        draw.scissor = false;
+    }
 
     qglViewport(0, 0, w, h);
     GL_Ortho(0, w, h, 0, -1, 1);
 
+    // a scene smaller than the FBO (splitscreen cell): no other cell's
+    // bloom around its part for the blur to pick up
+    if (w < bw || h < bh) {
+        qglBindFramebuffer(GL_FRAMEBUFFER, FBO_BLUR_1);
+        qglClear(GL_COLOR_BUFFER_BIT);
+        qglBindFramebuffer(GL_FRAMEBUFFER, FBO_BLUR_0);
+        qglClear(GL_COLOR_BUFFER_BIT);
+    }
+
     // downscale
-    gls.u_block.fog_color[0] = 1.0f / w;
-    gls.u_block.fog_color[1] = 1.0f / h;
+    gls.u_block.fog_color[0] = 1.0f / bw;
+    gls.u_block.fog_color[1] = 1.0f / bh;
     GL_ForceTexture(TMU_TEXTURE, TEXNUM_PP_BLOOM);
     qglBindFramebuffer(GL_FRAMEBUFFER, FBO_BLUR_0);
-    GL_PostProcess(GLS_BLUR_BOX, 0, 0, w, h);
+    GL_PostProcess(GLS_BLUR_BOX, 0, 0, w, h, ss, st);
 
     // blur X/Y
     for (int i = 0; i < iterations; i++) {
         int j = i & 1;
 
-        gls.u_block.fog_color[0] = 1.0f / w;
-        gls.u_block.fog_color[1] = 1.0f / h;
+        gls.u_block.fog_color[0] = 1.0f / bw;
+        gls.u_block.fog_color[1] = 1.0f / bh;
         gls.u_block.fog_color[j] = 0;
 
         GL_ForceTexture(TMU_TEXTURE, j ? TEXNUM_PP_BLUR_1 : TEXNUM_PP_BLUR_0);
         qglBindFramebuffer(GL_FRAMEBUFFER, j ? FBO_BLUR_0 : FBO_BLUR_1);
-        GL_PostProcess(GLS_BLUR_GAUSS, 0, 0, w, h);
+        GL_PostProcess(GLS_BLUR_GAUSS, 0, 0, w, h, bs, bt);
     }
 
     GL_Setup2D();
@@ -1763,6 +1787,8 @@ static void GL_DrawBloom(bool waterwarp)
     if (q_unlikely(gl_showbloom->integer)) {
         GL_ForceTexture(TMU_TEXTURE, TEXNUM_PP_BLUR_0);
         bits = GLS_DEFAULT;
+        ss = bs;
+        st = bt;
     } else {
         GL_ForceTexture(TMU_TEXTURE, TEXNUM_PP_SCENE);
         GL_ForceTexture(TMU_LIGHTMAP, TEXNUM_PP_BLUR_0);
@@ -1772,12 +1798,52 @@ static void GL_DrawBloom(bool waterwarp)
 
     // upscale & add
     qglBindFramebuffer(GL_FRAMEBUFFER, 0);
-    GL_PostProcess(bits, glr.fd.x, glr.fd.y, glr.fd.width, glr.fd.height);
+    GL_PostProcess(bits, glr.fd.x, glr.fd.y, glr.fd.width, glr.fd.height, ss, st);
+}
+
+/*
+Post-process FBO size. Upstream re-creates it whenever the refdef size
+changes; splitscreen cells of different sizes (fill layouts, N = 3/5/7)
+would do that for every scene. It is sized to the largest world scene of
+this and the previous frame, whether that scene needs it or not (only some
+cells under water must not flip it between sizes), so it is re-created only
+when the layout (or the window) changes; smaller scenes render into its
+bottom-left corner. One view: the same sizes as upstream (one frame later
+when it shrinks).
+*/
+static void GL_SizeFramebuffers(void)
+{
+    int w, h;
+
+    // world scenes are counted in R_RenderFrame; this covers any other
+    glr.framebuffer_frame_w = max(glr.framebuffer_frame_w, glr.fd.width);
+    glr.framebuffer_frame_h = max(glr.framebuffer_frame_h, glr.fd.height);
+    w = max(glr.framebuffer_frame_w, glr.framebuffer_last_w);
+    h = max(glr.framebuffer_frame_h, glr.framebuffer_last_h);
+
+    if (w == glr.framebuffer_width && h == glr.framebuffer_height && !gl_bloom->modified)
+        return;
+
+    // set developer 1 (also in a release build): every (re-)creation
+    if (Cvar_VariableInteger("developer"))
+        Com_Printf("%s: %dx%d (scene %dx%d)\n", __func__, w, h, glr.fd.width, glr.fd.height);
+    glr.framebuffer_width = w;
+    glr.framebuffer_height = h;
+    glr.framebuffer_ok = GL_InitFramebuffers(w, h);
+    gl_bloom->modified = false;
 }
 
 void R_RenderFrame(const refdef_t *fd)
 {
+    vrect_t rc;
+
     GL_Flush2D();
+
+    // the 2D draw rect scissor must not clip 3D or the post-process FBOs
+    if (draw.scissor) {
+        qglDisable(GL_SCISSOR_TEST);
+        draw.scissor = false;
+    }
 
     Q_assert(gl_static.world.cache || (fd->rdflags & RDF_NOWORLDMODEL));
 
@@ -1810,20 +1876,27 @@ void R_RenderFrame(const refdef_t *fd)
     bool waterwarp = false;
     bool bloom = false;
 
+    if (!(glr.fd.rdflags & RDF_NOWORLDMODEL)) {
+        glr.framebuffer_frame_w = max(glr.framebuffer_frame_w, glr.fd.width);
+        glr.framebuffer_frame_h = max(glr.framebuffer_frame_h, glr.fd.height);
+    }
+
     if (gl_static.use_shaders) {
         waterwarp = (glr.fd.rdflags & RDF_UNDERWATER) && gl_waterwarp->integer;
         bloom = !(glr.fd.rdflags & RDF_NOWORLDMODEL) && gl_bloom->integer;
 
         if (waterwarp || bloom || gl_bloom->modified) {
-            if (glr.fd.width != glr.framebuffer_width || glr.fd.height != glr.framebuffer_height || gl_bloom->modified) {
-                glr.framebuffer_ok = GL_InitFramebuffers();
-                glr.framebuffer_width = glr.fd.width;
-                glr.framebuffer_height = glr.fd.height;
-                gl_bloom->modified = false;
-            }
+            GL_SizeFramebuffers();
             if (!glr.framebuffer_ok)
                 waterwarp = bloom = false;
         }
+    }
+
+    // this scene's part of the post-process textures
+    float pp_s = 1, pp_t = 1;
+    if ((waterwarp || bloom) && glr.framebuffer_width > 0 && glr.framebuffer_height > 0) {
+        pp_s = (float)glr.fd.width / glr.framebuffer_width;
+        pp_t = (float)glr.fd.height / glr.framebuffer_height;
     }
 
     if (waterwarp || bloom) {
@@ -1874,14 +1947,18 @@ void R_RenderFrame(const refdef_t *fd)
         glr.framebuffer_bound = false;
     }
 
-    // go back into 2D mode
+    // go back into 2D mode, relative to the draw rect: from here on
+    // glr.fd.x/y (post-process, GL_Blend) are 2D coordinates
     GL_Setup2D();
+    GL_GetDrawRect(&rc);
+    glr.fd.x -= rc.x;
+    glr.fd.y -= rc.y;
 
     if (bloom) {
-        GL_DrawBloom(waterwarp);
+        GL_DrawBloom(waterwarp, pp_s, pp_t);
     } else if (waterwarp) {
         GL_ForceTexture(TMU_TEXTURE, TEXNUM_PP_SCENE);
-        GL_PostProcess(GLS_WARP_ENABLE, glr.fd.x, glr.fd.y, glr.fd.width, glr.fd.height);
+        GL_PostProcess(GLS_WARP_ENABLE, glr.fd.x, glr.fd.y, glr.fd.width, glr.fd.height, pp_s, pp_t);
     }
 
     if (gl_polyblend->integer)
@@ -1899,6 +1976,13 @@ void R_RenderFrame(const refdef_t *fd)
 void R_BeginFrame(void)
 {
     memset(&c, 0, sizeof(c));
+
+    draw.rect_set = false;  // every frame starts on the whole window
+
+    // post-process FBO: the largest scene of the last frame (GL_SizeFramebuffers)
+    glr.framebuffer_last_w = glr.framebuffer_frame_w;
+    glr.framebuffer_last_h = glr.framebuffer_frame_h;
+    glr.framebuffer_frame_w = glr.framebuffer_frame_h = 0;
 
     if (gl_finish->integer)
         qglFinish();

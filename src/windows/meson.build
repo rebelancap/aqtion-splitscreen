@@ -22,10 +22,14 @@ if get_option('aqtion-build')
     include_directories: rc_inc,
   )
 
-  game_src += windows.compile_resources('res/aqtion.rc',
+  # splitscreen fork: the Action game DLL (action_src) gets the version
+  # resource too (upstream adds it only to the unused game_src)
+  aqtion_game_res = windows.compile_resources('res/aqtion.rc',
     args:                rc_args,
     include_directories: rc_inc,
   )
+  game_src += aqtion_game_res
+  action_src += aqtion_game_res
 else
   client_src += windows.compile_resources('res/q2pro.rc',
   args:                rc_args,

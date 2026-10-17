@@ -62,6 +62,15 @@ typedef enum {
 typedef enum {
     NS_CLIENT,
     NS_SERVER,
+    // splitscreen: sockets of local players 2..8, after NS_SERVER so that
+    // NS_CLIENT ^ 1 == NS_SERVER still holds for player 1's loopback
+    NS_CLIENT2,
+    NS_CLIENT3,
+    NS_CLIENT4,
+    NS_CLIENT5,
+    NS_CLIENT6,
+    NS_CLIENT7,
+    NS_CLIENT8,
     NS_COUNT
 } netsrc_t;
 
@@ -190,6 +199,10 @@ void        NET_Config(netflag_t flag);
 void        NET_UpdateStats(void);
 
 bool        NET_GetAddress(netsrc_t sock, netadr_t *adr);
+#if USE_CLIENT
+bool        NET_OpenSplitSocket(netsrc_t sock, bool ipv6);
+void        NET_CloseSplitSocket(netsrc_t sock);
+#endif
 void        NET_GetPackets(netsrc_t sock, void (*packet_cb)(void));
 bool        NET_SendPacket(netsrc_t sock, const void *data,
                            size_t len, const netadr_t *to);

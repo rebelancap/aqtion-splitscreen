@@ -104,6 +104,15 @@ static void Win_SetPosition(void)
 
     // set new window style and position
     SetWindowLong(win.wnd, GWL_STYLE, style);
+    if (win.noactivate) {
+        // splitscreen: test window, never activated, raised or topmost
+        SetWindowPos(win.wnd, HWND_BOTTOM, x, y, w, h,
+                     SWP_FRAMECHANGED | SWP_SHOWWINDOW | SWP_NOACTIVATE);
+        UpdateWindow(win.wnd);
+        // no WM_ACTIVATE will come: run at full rate as if focused
+        CL_Activate(ACT_ACTIVATED);
+        return;
+    }
     SetWindowPos(win.wnd, after, x, y, w, h, SWP_FRAMECHANGED | SWP_SHOWWINDOW);
     UpdateWindow(win.wnd);
     SetForegroundWindow(win.wnd);
@@ -362,8 +371,9 @@ Win_SetMode
 */
 void Win_SetMode(void)
 {
-    // set full screen mode if requested
-    if (vid_fullscreen->integer > 0) {
+    // set full screen mode if requested (never in a vid_noactivate test
+    // window: no display mode change, no topmost popup)
+    if (vid_fullscreen->integer > 0 && !win.noactivate) {
         LONG ret;
 
         ret = set_fullscreen_mode();
@@ -385,7 +395,8 @@ void Win_SetMode(void)
         Cvar_Reset(vid_fullscreen);
     }
 
-    ChangeDisplaySettings(NULL, 0);
+    if (!win.noactivate)
+        ChangeDisplaySettings(NULL, 0);
 
     // parse vid_geometry specification
     VID_GetGeometry(&win.rc);
@@ -442,7 +453,7 @@ static void Win_EnableAltTab(void)
 
 static void win_noalttab_changed(cvar_t *self)
 {
-    if (self->integer) {
+    if (self->integer && !win.noactivate) {
         Win_DisableAltTab();
     } else {
         Win_EnableAltTab();
@@ -452,6 +463,13 @@ static void win_noalttab_changed(cvar_t *self)
 static void Win_Activate(WPARAM wParam)
 {
     active_t active;
+
+    if (win.noactivate) {
+        // test window: always run as if focused (full frame rate, sound),
+        // but touch nothing global (hotkeys, gamma, mouse, foreground)
+        CL_Activate(HIWORD(wParam) ? ACT_MINIMIZED : ACT_ACTIVATED);
+        return;
+    }
 
     if (HIWORD(wParam)) {
         // we don't want to act like we're active if we're minimized
@@ -540,7 +558,7 @@ ignore:
 
 static void win_disablewinkey_changed(cvar_t *self)
 {
-    if (self->integer) {
+    if (self->integer && !win.noactivate) {
         win.kbdHook = SetWindowsHookEx(WH_KEYBOARD_LL, LowLevelKeyboardProc, hGlobalInstance, 0);
         if (!win.kbdHook) {
             Com_EPrintf("Couldn't set low-level keyboard hook, error %#lX\n", GetLastError());
@@ -805,7 +823,7 @@ static LRESULT WINAPI Win_MainWndProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARA
 {
     switch (uMsg) {
     case WM_MOUSEMOVE:
-        if (win.mouse.initialized)
+        if (win.mouse.initialized && !win.noactivate)
             UI_MouseEvent((short)LOWORD(lParam), (short)HIWORD(lParam));
         break;
 
@@ -823,6 +841,17 @@ static LRESULT WINAPI Win_MainWndProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARA
 
     case WM_ACTIVATE:
         Win_Activate(wParam);
+        break;
+
+    case WM_GETMINMAXINFO:
+        // splitscreen: a vid_noactivate test window may be larger than the
+        // desktop (1080p / 4K cells on a smaller or disconnected display)
+        if (win.noactivate) {
+            MINMAXINFO *mmi = (MINMAXINFO *)lParam;
+            mmi->ptMaxTrackSize.x = mmi->ptMaxSize.x = 8192;
+            mmi->ptMaxTrackSize.y = mmi->ptMaxSize.y = 8192;
+            return 0;
+        }
         break;
 
     case WM_WINDOWPOSCHANGING:
@@ -950,7 +979,15 @@ void Win_Init(void)
     win_noborder = Cvar_Get("win_noborder", "0", 0);
     win_noborder->changed = win_style_changed;
 
-    win_disablewinkey_changed(win_disablewinkey);
+    // splitscreen: dev/test-only window that never takes focus, never
+    // grabs the mouse, never goes fullscreen and never installs global
+    // hooks or hotkeys; read once per window creation
+    win.noactivate = Cvar_Get("vid_noactivate", "0", CVAR_NOARCHIVE)->integer > 0;
+    if (win.noactivate) {
+        Com_Printf("vid_noactivate: test window, never activated\n");
+    } else {
+        win_disablewinkey_changed(win_disablewinkey);
+    }
 
     win.GetDpiForWindow = (PVOID)GetProcAddress(GetModuleHandle("user32"), "GetDpiForWindow");
 
@@ -972,8 +1009,9 @@ void Win_Init(void)
     }
 
     // create the window
-    win.wnd = CreateWindowA(WINDOW_CLASS_NAME, PRODUCT, 0, 0, 0, 0, 0, NULL,
-                            NULL, hGlobalInstance, NULL);
+    win.wnd = CreateWindowExA(win.noactivate ? WS_EX_NOACTIVATE : 0,
+                              WINDOW_CLASS_NAME, PRODUCT, 0, 0, 0, 0, 0, NULL,
+                              NULL, hGlobalInstance, NULL);
     if (!win.wnd) {
         Com_Error(ERR_FATAL, "Couldn't create main window");
     }
@@ -1127,6 +1165,10 @@ bool Win_InitMouse(void)
 // Called when the main window gains or loses focus.
 void Win_GrabMouse(bool grab)
 {
+    if (win.noactivate) {
+        grab = false;   // splitscreen: test window never takes the mouse
+    }
+
     if (!win.mouse.initialized) {
         return;
     }
@@ -1150,6 +1192,9 @@ void Win_GrabMouse(bool grab)
 
 void Win_WarpMouse(int x, int y)
 {
+    if (win.noactivate) {
+        return;
+    }
     SetCursorPos(win.screen_rc.left + x, win.screen_rc.top + y);
 }
 

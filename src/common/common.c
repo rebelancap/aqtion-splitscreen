@@ -557,6 +557,13 @@ void Com_Error(error_type_t code, const char *fmt, ...)
     // reset Com_Printf recursion level
     com_printEntered = 0;
 
+    // splitscreen: an error inside a local extra player's work drops only
+    // that player (longjmps back to its guard); otherwise player 1 is made
+    // the active client context again and the stock path below runs
+    com_errorEntered = false;
+    CL_SplitTrapError(code, com_errorMsg);
+    com_errorEntered = true;
+
     if (code == ERR_DISCONNECT || code == ERR_RECONNECT) {
         Com_WPrintf("%s\n", com_errorMsg);
         SV_Shutdown(va("Server was killed: %s\n", com_errorMsg), code);
@@ -876,6 +883,38 @@ void Com_AddConfigFile(const char *name, unsigned flags)
 
 /*
 =================
+Com_ExecPostinit
+
+splitscreen: AQtion's postinit.cfg runs "if $name == AQtionMan then pushmenu
+first_start" (the name prompt, skipped by our UI). A name with spaces, like
+our default "Player 1", would split that test into an unknown operator, so
+it runs with the name hidden. Afterwards the Steam default name "AQtionMan"
+becomes "Player 1", the name every other local player has by number.
+=================
+*/
+static void Com_ExecPostinit(void)
+{
+#if USE_CLIENT
+    cvar_t *name = Cvar_FindVar("name");
+    const char *final = NULL;
+
+    if (name && !Q_stricmp(name->string, "AQtionMan"))
+        final = "Player 1";
+    else if (name && strchr(name->string, ' ') && !strchr(name->string, '"'))
+        final = va("%s", name->string);
+    if (final) {
+        // the file's lines go in front of this, so the name comes back right
+        // after them (also when a "wait" in the buffer delays them)
+        Cbuf_InsertText(&cmd_buffer, va("set name \"%s\"\n", final));
+        Cvar_SetByVar(name, "_", FROM_CODE);
+    }
+#endif
+
+    Com_AddConfigFile(COM_POSTINIT_CFG, FS_TYPE_REAL);
+}
+
+/*
+=================
 Qcommon_Init
 =================
 */
@@ -1006,6 +1045,8 @@ void Qcommon_Init(int argc, char **argv)
     logfile_name->changed = logfile_param_changed;
     logfile_enable_changed(logfile_enable);
 
+    Sys_PrintLocationNote();
+
     FS_AddConfigFiles(true);
 
     Com_AddEarlyCommands(true);
@@ -1050,7 +1091,7 @@ void Qcommon_Init(int argc, char **argv)
         NET_Config(NET_SERVER);
     }
 
-    Com_AddConfigFile(COM_POSTINIT_CFG, FS_TYPE_REAL);
+    Com_ExecPostinit();
 
     Com_Printf("====== " PRODUCT " initialized ======\n\n");
     Com_NPrintf(APPLICATION " " VERSION ", " __DATE__ "\n");

@@ -887,6 +887,159 @@ const char *Sys_ErrorString(int err)
 
 /*
 ================
+split_self_locate
+
+Two placements of our exe in a Steam AQtion install, found by the folders
+beside it (never by the exe's file name):
+
+- AQtion root (the exe's folder has baseaq\ and action\): basedir and
+  libdir = that folder (the game library is Steam's action\gamex86_64.dll;
+  a DLL in the root itself is never used), homedir = <AQtion>\splitscreen
+  (created), so the engine writes nothing into Steam's folders.
+- A subfolder of AQtion (the exe's folder has no baseaq\, its parent has
+  baseaq\ and action\): basedir and libdir = the parent, homedir =
+  <exe dir>\home (created), sys_forcegamelib = <exe dir>\gamex86_64.dll only
+  if one is there (dev builds).
+
+Both default game to action and make the AQtion root the working directory
+(the game DLL's own files, as under Steam). Anything given on the command line
+(Com_AddEarlyCommands ran before Sys_Init) wins. Anywhere else (the repo's
+build\, no game data) nothing changes.
+================
+*/
+static char split_location_note[MAX_OSPATH * 5 + 128];
+
+static bool split_is_dir(const WCHAR *path)
+{
+    DWORD attr = GetFileAttributesW(path);
+    return attr != INVALID_FILE_ATTRIBUTES && (attr & FILE_ATTRIBUTE_DIRECTORY);
+}
+
+static bool split_to_utf8(const WCHAR *in, char *out, int size)
+{
+    return WideCharToMultiByte(CP_UTF8, 0, in, -1, out, size, NULL, NULL) > 0;
+}
+
+static bool split_chdir_root;
+
+static bool split_is_absolute(const char *path)
+{
+    return (Q_isalpha(path[0]) && path[1] == ':' && (path[2] == '\\' || path[2] == '/')) ||
+           ((path[0] == '\\' || path[0] == '/') && (path[1] == '\\' || path[1] == '/'));
+}
+
+// dir has baseaq\ and action\ (an AQtion install root)
+static bool split_is_aqtion_root(const WCHAR *dir)
+{
+    WCHAR test[MAX_PATH];
+
+    if (_snwprintf(test, MAX_PATH, L"%s\\baseaq", dir) < 0 || !split_is_dir(test))
+        return false;
+    if (_snwprintf(test, MAX_PATH, L"%s\\action", dir) < 0 || !split_is_dir(test))
+        return false;
+    return true;
+}
+
+static void split_self_locate(void)
+{
+    WCHAR exedir[MAX_PATH], parent[MAX_PATH], test[MAX_PATH];
+    char exe8[MAX_OSPATH], base8[MAX_OSPATH], home8[MAX_OSPATH], lib8[MAX_OSPATH];
+    WCHAR *slash;
+    DWORD ret;
+    bool root;
+
+    ret = GetModuleFileNameW(NULL, exedir, MAX_PATH);
+    if (ret == 0 || ret >= MAX_PATH)
+        return;
+    if (!(slash = wcsrchr(exedir, L'\\')))
+        return;
+    *slash = 0;
+
+    wcscpy(parent, exedir);
+    root = split_is_aqtion_root(exedir);
+    if (!root) {
+        if (_snwprintf(test, MAX_PATH, L"%s\\baseaq", exedir) < 0 || split_is_dir(test))
+            return;     // baseaq\ without action\: not a Steam AQtion, as before
+        if (!(slash = wcsrchr(parent, L'\\')))
+            return;
+        *slash = 0;
+        if (slash == parent + 2 && parent[1] == L':')
+            wcscat(parent, L"\\");   // drive root, e.g. "D:\"
+        if (!split_is_aqtion_root(parent))
+            return;     // repo build\ dir and anything else: as before
+    }
+
+    if (!split_to_utf8(exedir, exe8, sizeof(exe8)) ||
+        !split_to_utf8(parent, base8, sizeof(base8)))
+        return;
+    if (strlen(base8) >= MAX_OSPATH - MAX_QPATH || strlen(exe8) + 12 >= MAX_OSPATH - MAX_QPATH)
+        return;
+
+    if (!Cvar_FindVar("basedir"))
+        Cvar_FullSet("basedir", base8, CVAR_NOSET, FROM_CODE);
+
+    // the game library comes from the install (Steam's action\gamex86_64.dll,
+    // legacy API 4, see SV_InitGameProgs) unless one sits beside an exe in a
+    // subfolder; libdir\<game>\gamex86_64.dll never picks one in the root
+    if (!Cvar_FindVar("libdir"))
+        Cvar_FullSet("libdir", base8, CVAR_NOSET, FROM_CODE);
+
+    // root: <AQtion>\splitscreen, never Steam's action\ / baseaq\ folders
+    if (!Cvar_FindVar("homedir")) {
+        _snwprintf(test, MAX_PATH, root ? L"%s\\splitscreen" : L"%s\\home", exedir);
+        test[MAX_PATH - 1] = 0;
+        CreateDirectoryW(test, NULL);   // fails harmlessly if it exists
+        Q_concat(home8, sizeof(home8), exe8, root ? "\\splitscreen" : "\\home");
+        Cvar_FullSet("homedir", home8, CVAR_NOSET, FROM_CODE);
+    }
+
+    if (!root && sys_forcegamelib && !sys_forcegamelib->string[0]) {
+        _snwprintf(test, MAX_PATH, L"%s\\gamex86_64.dll", exedir);
+        test[MAX_PATH - 1] = 0;
+        ret = GetFileAttributesW(test);
+        if (ret != INVALID_FILE_ATTRIBUTES && !(ret & FILE_ATTRIBUTE_DIRECTORY)) {
+            Q_concat(lib8, sizeof(lib8), exe8, "\\gamex86_64.dll");
+            Cvar_SetByVar(sys_forcegamelib, lib8, FROM_CODE);
+        }
+    }
+
+    // working directory = the AQtion root, in both placements: what Steam's
+    // launch gives the game DLL, which opens its own files relative to it
+    // (action\action.ini, action\tng\<map>.aqg, bot data action\bots\ and
+    // action\terrain\<map>.ltk, vote lists) and writes items.txt / bot files
+    // there as Steam's own AQtion does. Only when every engine path is
+    // absolute (or empty), so the move cannot break one given relative to
+    // the exe's folder on the command line.
+    if (split_is_absolute(Cvar_VariableString("basedir")) &&
+        split_is_absolute(Cvar_VariableString("libdir")) &&
+        (!Cvar_VariableString("homedir")[0] || split_is_absolute(Cvar_VariableString("homedir"))) &&
+        (!sys_forcegamelib || !sys_forcegamelib->string[0] ||
+         split_is_absolute(sys_forcegamelib->string)) &&
+        SetCurrentDirectoryW(parent))
+        split_chdir_root = true;
+
+    if (!Cvar_FindVar("game"))
+        Cvar_FullSet("game", "action", 0, FROM_CODE);
+
+    Q_snprintf(split_location_note, sizeof(split_location_note),
+               "split: running from %s (%s), basedir %s, homedir %s, game library %s, "
+               "working directory %s\n",
+               exe8, root ? "AQtion root" : "subfolder of AQtion",
+               Cvar_VariableString("basedir"), Cvar_VariableString("homedir"),
+               sys_forcegamelib && sys_forcegamelib->string[0] ? sys_forcegamelib->string :
+               va("from libdir %s", Cvar_VariableString("libdir")),
+               split_chdir_root ? base8 : va("%s (unchanged)", exe8));
+}
+
+// printed once the console log is open (Qcommon_Init)
+void Sys_PrintLocationNote(void)
+{
+    if (split_location_note[0])
+        Com_Printf("%s", split_location_note);
+}
+
+/*
+================
 Sys_Init
 ================
 */
@@ -897,6 +1050,8 @@ void Sys_Init(void)
 
     if (COM_DEDICATED)
         SetErrorMode(SEM_FAILCRITICALERRORS);
+
+    split_self_locate();
 
     // basedir <path>
     // allows the game to run from outside the data tree

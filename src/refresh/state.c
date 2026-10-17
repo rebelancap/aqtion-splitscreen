@@ -203,18 +203,18 @@ void GL_Ortho(GLfloat xmin, GLfloat xmax, GLfloat ymin, GLfloat ymax, GLfloat zn
 
 void GL_Setup2D(void)
 {
-    qglViewport(0, 0, r_config.width, r_config.height);
+    vrect_t rc;
 
-    GL_Ortho(0, r_config.width, r_config.height, 0, -1, 1);
+    GL_GetDrawRect(&rc);
+    qglViewport(rc.x, r_config.height - (rc.y + rc.height), rc.width, rc.height);
+
+    GL_Ortho(0, rc.width, rc.height, 0, -1, 1);
     draw.scale = 1;
 
     draw.colors[0].u32 = U32_WHITE;
     draw.colors[1].u32 = U32_WHITE;
 
-    if (draw.scissor) {
-        qglDisable(GL_SCISSOR_TEST);
-        draw.scissor = false;
-    }
+    GL_ScissorDrawRect();
 
     if (gl_backend->setup_2d)
         gl_backend->setup_2d();

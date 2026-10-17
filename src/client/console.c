@@ -741,6 +741,10 @@ static void Con_DrawNotify(void)
     unsigned    time;
     int     skip;
     float   alpha;
+    vrect_t cell;
+    float   scale;
+    int     linewidth = con.linewidth;
+    bool    in_cell;
 
     // only draw notify in game
     if (cls.state != ca_active) {
@@ -756,6 +760,14 @@ static void Con_DrawNotify(void)
     j = con_notifylines->integer;
     if (j > CON_TIMES) {
         j = CON_TIMES;
+    }
+
+    // splitscreen: in player 1's cell, at its scale, cut at its width
+    in_cell = SCR_SplitNotifyCell(&cell, &scale, con.scale);
+    if (in_cell) {
+        R_SetDrawRect(&cell);
+        R_SetScale(scale);
+        con.linewidth = Q_clip(Q_rint(cell.width * scale) / CONCHAR_WIDTH - 2, 0, CON_LINEWIDTH);
     }
 
     v = 0;
@@ -794,6 +806,12 @@ static void Con_DrawNotify(void)
         con.chatPrompt.inputLine.visibleChars = con.linewidth - skip + 1;
         IF_Draw(&con.chatPrompt.inputLine, skip * CONCHAR_WIDTH, v,
                 UI_DRAWCURSOR, con.charsetImage);
+    }
+
+    if (in_cell) {
+        con.linewidth = linewidth;
+        R_SetDrawRect(NULL);
+        R_SetScale(con.scale);
     }
 }
 

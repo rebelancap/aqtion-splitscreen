@@ -384,28 +384,8 @@ EXPLOSION MANAGEMENT
 ==============================================================
 */
 
-#define MAX_EXPLOSIONS  256
-
-typedef struct {
-    enum {
-        ex_free,
-        ex_misc,
-        ex_flash,
-        ex_mflash,
-        ex_poly,
-        ex_poly2,
-        ex_light
-    } type;
-
-    entity_t    ent;
-    int         frames;
-    float       light;
-    vec3_t      lightcolor;
-    float       start;
-    int         baseframe;
-} explosion_t;
-
-static explosion_t  cl_explosions[MAX_EXPLOSIONS];
+// per player context (client_context_t)
+#define cl_explosions   (cla->fx.explosions)
 
 static void CL_ClearExplosions(void)
 {
@@ -652,18 +632,8 @@ LASER MANAGEMENT
 ==============================================================
 */
 
-#define MAX_LASERS  256
-
-typedef struct {
-    vec3_t      start;
-    vec3_t      end;
-    int         color;
-    color_t     rgba;
-    int         width;
-    int         lifetime, starttime;
-} laser_t;
-
-static laser_t  cl_lasers[MAX_LASERS];
+// per player context (client_context_t)
+#define cl_lasers   (cla->fx.lasers)
 
 static void CL_ClearLasers(void)
 {
@@ -741,19 +711,9 @@ BEAM MANAGEMENT
 ==============================================================
 */
 
-#define MAX_BEAMS   128
-
-typedef struct {
-    int         entity;
-    int         dest_entity;
-    qhandle_t   model;
-    int         endtime;
-    vec3_t      offset;
-    vec3_t      start, end;
-} beam_t;
-
-static beam_t   cl_beams[MAX_BEAMS];
-static beam_t   cl_playerbeams[MAX_BEAMS];
+// per player context (client_context_t)
+#define cl_beams        (cla->fx.beams)
+#define cl_playerbeams  (cla->fx.playerbeams)
 
 static void CL_ClearBeams(void)
 {
@@ -1076,9 +1036,8 @@ SUSTAIN MANAGEMENT
 ==============================================================
 */
 
-#define MAX_SUSTAINS    32
-
-static cl_sustain_t     cl_sustains[MAX_SUSTAINS];
+// per player context (client_context_t)
+#define cl_sustains     (cla->fx.sustains)
 
 static void CL_ClearSustains(void)
 {
@@ -1315,8 +1274,8 @@ void CL_ParseTEnt(void)
         if (te.type != TE_SPARKS) {
             CL_SmokeAndFlash(te.pos1);
 
-            // impact sound
-            r = Q_rand() & 15;
+            // impact sound (splitscreen: the same roll in every player's context)
+            r = S_SplitImpactRand(te.pos1) & 15;
             if (r == 1)
                 S_StartSound(te.pos1, 0, 0, cl_sfx_ric1, 1, ATTN_NORM, 0);
             else if (r == 2)

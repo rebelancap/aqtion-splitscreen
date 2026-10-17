@@ -225,7 +225,7 @@ static void AL_Spatialize(channel_t *ch)
     } else if (ch->fixed_origin) {
         VectorCopy(ch->origin, origin);
     } else {
-        CL_GetEntitySoundOrigin(ch->entnum, origin);
+        S_GetChannelOrigin(ch, origin);
     }
 
     if (s_source_spatialize) {

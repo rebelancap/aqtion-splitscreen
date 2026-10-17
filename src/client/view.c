@@ -51,16 +51,8 @@ static cvar_t    *cl_zoom_4x;
 static cvar_t    *cl_zoom_6x;
 #endif
 
-int         r_numdlights;
-dlight_t    r_dlights[MAX_DLIGHTS];
-
-int         r_numentities;
-entity_t    r_entities[MAX_ENTITIES];
-
-int         r_numparticles;
-particle_t  r_particles[MAX_PARTICLES];
-
-lightstyle_t    r_lightstyles[MAX_LIGHTSTYLES];
+// r_numdlights, r_dlights, r_numentities, r_entities, r_numparticles,
+// r_particles and r_lightstyles are per player context (client.h)
 
 /*
 ====================
@@ -419,8 +411,8 @@ void V_RenderView(void)
         cl.refdef.vieworg[1] += 1.0f / 16;
         cl.refdef.vieworg[2] += 1.0f / 16;
 
-        cl.refdef.x = scr_vrect.x;
-        cl.refdef.y = scr_vrect.y;
+        cl.refdef.x = scr_cell.x + scr_vrect.x;
+        cl.refdef.y = scr_cell.y + scr_vrect.y;
         cl.refdef.width = scr_vrect.width;
         cl.refdef.height = scr_vrect.height;
 
@@ -475,7 +467,9 @@ void V_RenderView(void)
         qsort(cl.refdef.entities, cl.refdef.num_entities, sizeof(cl.refdef.entities[0]), entitycmpfnc);
     }
 
+    CL_SplitPerfMark(SPLIT_PERF_RENDER);    // cl_splitperf: scene built
     R_RenderFrame(&cl.refdef);
+    CL_SplitPerfMark(SPLIT_PERF_2D);
 #if USE_DEBUG
     if (cl_stats->integer)
         Com_Printf("ent:%i  lt:%i  part:%i\n", r_numentities, r_numdlights, r_numparticles);

@@ -72,7 +72,15 @@ typedef enum {
 bool CL_ProcessEvents(void);
 #if USE_ICMP
 void CL_ErrorEvent(const netadr_t *from);
+void CL_SplitErrorEvent(netsrc_t sock, const netadr_t *from);
 #endif
+void CL_SplitTrapError(error_type_t code, const char *msg);
+// splitscreen: the engine UI in its owner's cell (src/client/split/split_menu.c;
+// ui.c must see these: an implicit declaration returns int, not float)
+bool  CL_SplitUIRect(vrect_t *rc);
+float CL_SplitUIScale(float window_scale, const vrect_t *rc);
+void  CL_SplitUIOpened(void);
+float CL_SplitUIMenuSize(void);
 void CL_Init(void);
 void CL_Disconnect(error_type_t type);
 void CL_Shutdown(void);
@@ -148,6 +156,8 @@ float V_CalcFov(float fov_x, float width, float height);
 #define CL_Shutdown()                   (void)0
 #define CL_UpdateUserinfo(var, from)    (void)0
 #define CL_ErrorEvent(from)             (void)0
+#define CL_SplitErrorEvent(sock, from)  (void)0
+#define CL_SplitTrapError(code, msg)    (void)0
 #define CL_RestartFilesystem(total)     FS_Restart(total)
 #define CL_ForwardToServer()            false
 #define CL_CheatsOK()                   (bool)Cvar_VariableInteger("cheats")

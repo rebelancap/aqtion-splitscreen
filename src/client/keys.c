@@ -17,6 +17,7 @@ with this program; if not, write to the Free Software Foundation, Inc.,
 */
 
 #include "client.h"
+#include "split/gamepad.h"
 
 static keywaitcb_t  key_wait_cb;
 static void         *key_wait_arg;
@@ -465,6 +466,8 @@ void Key_WriteBindings(qhandle_t f)
                        keybindings[i]);
         }
     }
+
+    PAD_WriteBindings(f);   // splitscreen: per-player pad binds
 }
 
 
@@ -643,6 +646,11 @@ void Key_Event(unsigned key, bool down, unsigned time)
         if (keydown[key] == 1) {
             VID_ToggleFullscreen();
         }
+        return;
+    }
+
+    // splitscreen: player 1's overlay menu takes the keyboard and mouse
+    if (CL_SplitMenuKeyEvent(key, down)) {
         return;
     }
 

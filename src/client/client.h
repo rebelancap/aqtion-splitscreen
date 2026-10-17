@@ -94,7 +94,7 @@ typedef struct {
     float           flashlightfrac;
 } centity_t;
 
-extern centity_t    cl_entities[MAX_EDICTS];
+// cl_entities is per player context, see client_context_t at the end
 
 #define MAX_CLIENTWEAPONMODELS        256       // PGM -- upped from 16 to fit the chainfist vwep
 
@@ -330,7 +330,7 @@ typedef struct {
     player_fog_t custom_fog;
 } client_state_t;
 
-extern client_state_t   cl;
+// cl is per player context, see client_context_t at the end
 
 /*
 ==================================================================
@@ -397,19 +397,48 @@ typedef struct {
     byte        data[1];
 } demosnap_t;
 
+// per-connection slice of client_static_t: one per player context, the
+// active one lives in cls (anonymous member) and is swapped by CL_SetContext
 typedef struct {
     connstate_t state;
+
+    int         userinfo_modified;
+    cvar_t      *userinfo_updates[MAX_PACKET_USERINFOS];
+// this is set each time a CVAR_USERINFO variable is changed
+// so that the client knows to send it to the server
+
+// connection information
+    netadr_t    serverAddress;
+    char        servername[MAX_OSPATH]; // name of server from original connect
+    unsigned    connect_time;           // for connection retransmits
+    int         connect_count;
+    bool        passive;
+
+    int         quakePort;          // a 16 bit value that allows quake servers
+                                    // to work around address translating routers
+    netchan_t   netchan;
+    int         serverProtocol;     // in case we are doing some kind of version hack
+    int         protocolVersion;    // minor version
+
+    int         challenge;          // from the server to use for connecting
+
+#if USE_ICMP
+    bool        errorReceived;      // got an ICMP error from server
+#endif
+} client_conn_t;
+
+typedef struct {
+    union {
+        client_conn_t;              // cls.state, cls.netchan, ... (MS extension)
+        client_conn_t   conn;       // the whole slice, for CL_SetContext
+    };
+
     keydest_t   key_dest;
 
     active_t    active;
 
     bool        ref_initialized;
     unsigned    disable_screen;
-
-    int         userinfo_modified;
-    cvar_t      *userinfo_updates[MAX_PACKET_USERINFOS];
-// this is set each time a CVAR_USERINFO variable is changed
-// so that the client knows to send it to the server
 
     unsigned    realtime;           // always increasing, no clamping, etc
     float       frametime;          // seconds since last frame
@@ -430,28 +459,7 @@ typedef struct {
         int         ping;
     } measure;
 
-// connection information
-    netadr_t    serverAddress;
-    char        servername[MAX_OSPATH]; // name of server from original connect
-    unsigned    connect_time;           // for connection retransmits
-    int         connect_count;
-    bool        passive;
-
-#if USE_ZLIB
-    z_stream    z;
-#endif
-
-    int         quakePort;          // a 16 bit value that allows quake servers
-                                    // to work around address translating routers
-    netchan_t   netchan;
-    int         serverProtocol;     // in case we are doing some kind of version hack
-    int         protocolVersion;    // minor version
-
-    int         challenge;          // from the server to use for connecting
-
-#if USE_ICMP
-    bool        errorReceived;      // got an ICMP error from server
-#endif
+// zlib inflate stream for compressed packets: per context, see CL_Z
 
 #define RECENT_ADDR 4
 #define RECENT_MASK (RECENT_ADDR - 1)
@@ -520,8 +528,7 @@ typedef struct {
 
 extern client_static_t      cls;
 
-extern cmdbuf_t     cl_cmdbuf;
-extern char         cl_cmdbuf_text[MAX_STRING_CHARS];
+// cl_cmdbuf / cl_cmdbuf_text (stufftext) are per player context
 
 //=============================================================================
 
@@ -709,6 +716,13 @@ void CL_InitDownloads(void);
 //
 // input.c
 //
+typedef struct {
+    int         down[2];        // key nums holding it down
+    unsigned    downtime;        // msec timestamp
+    unsigned    msec;            // msec down this frame
+    int         state;
+} kbutton_t;
+
 void IN_Init(void);
 void IN_Shutdown(void);
 void IN_Frame(void);
@@ -770,6 +784,7 @@ extern snd_params_t     snd;
 
 void CL_ParseServerMessage(void);
 bool CL_SeekDemoMessage(void);
+bool CL_WriteCvarSync(int index, const char *value);   // active netchan
 
 
 //
@@ -829,6 +844,51 @@ typedef struct cl_sustain_s {
     int     magnitude;
     void    (*think)(struct cl_sustain_s *self);
 } cl_sustain_t;
+
+#define MAX_SUSTAINS    32
+
+#define MAX_EXPLOSIONS  256
+
+typedef struct {
+    enum {
+        ex_free,
+        ex_misc,
+        ex_flash,
+        ex_mflash,
+        ex_poly,
+        ex_poly2,
+        ex_light
+    } type;
+
+    entity_t    ent;
+    int         frames;
+    float       light;
+    vec3_t      lightcolor;
+    float       start;
+    int         baseframe;
+} explosion_t;
+
+#define MAX_LASERS  256
+
+typedef struct {
+    vec3_t      start;
+    vec3_t      end;
+    int         color;
+    color_t     rgba;
+    int         width;
+    int         lifetime, starttime;
+} laser_t;
+
+#define MAX_BEAMS   128
+
+typedef struct {
+    int         entity;
+    int         dest_entity;
+    qhandle_t   model;
+    int         endtime;
+    vec3_t      offset;
+    vec3_t      start, end;
+} beam_t;
 
 typedef enum {
     MFLASH_MACHN,
@@ -898,6 +958,11 @@ typedef struct {
     float   radius;
     int     die;        // stop lighting after this time
 } cdlight_t;
+
+typedef struct {
+    int     length;
+    float   map[MAX_QPATH - 1];
+} clightstyle_t;
 
 typedef enum {
     DT_GIB,
@@ -1030,6 +1095,31 @@ void    CL_RunRefresh(void);
 // screen.c
 //
 extern vrect_t      scr_vrect;        // position of render window
+extern vrect_t      scr_cell;         // splitscreen cell in window pixels (Spike C)
+
+#define MAX_CENTERPRINTS_REAL   4
+
+typedef struct {
+    char        string[MAX_STRING_CHARS - 8];
+    uint32_t    start;
+    uint16_t    lines;
+    uint16_t    typewrite;  // msec to typewrite (0 if instant)
+} centerprint_t;
+
+#define MAX_CHAT_TEXT       150
+#define MAX_CHAT_LINES      32
+
+typedef struct {
+    char        text[MAX_CHAT_TEXT];
+    unsigned    time;
+} chatline_t;
+
+#define LAG_WIDTH 48
+
+typedef struct {
+    unsigned samples[LAG_WIDTH];
+    unsigned head;
+} scr_lag_t;
 
 void    SCR_Init(void);
 void    SCR_Shutdown(void);
@@ -1047,6 +1137,7 @@ void    SCR_SetCrosshairColor(void);
 void    SCR_AddNetgraph(void);
 
 float   SCR_FadeAlpha(unsigned startTime, unsigned visTime, unsigned fadeTime);
+bool    SCR_SplitNotifyCell(vrect_t *rc, float *scale, float window_scale);
 int     SCR_DrawStringEx(int x, int y, int flags, size_t maxlen, const char *s, qhandle_t font);
 void    SCR_DrawStringMulti(int x, int y, int flags, size_t maxlen, const char *s, qhandle_t font);
 
@@ -1126,6 +1217,119 @@ void CL_GTV_Shutdown(void);
 #define CL_GTV_Init()                   (void)0
 #define CL_GTV_Shutdown()               (void)0
 #endif
+
+//
+// split/split.c -- per player client contexts (splitscreen)
+//
+// Everything that belongs to one local player's connection lives in a
+// client_context_t. The macros below make the existing code (cl.*,
+// cl_entities[], cl_cmdbuf, ...) address the active context; the
+// connection half of cls is swapped in and out by CL_SetContext. Context 0
+// is a static object and always active outside an explicit context loop.
+//
+
+#define MAX_SPLITVIEW   8
+
+typedef struct {        // effects.c + tent.c
+    clightstyle_t   lightstyles[MAX_LIGHTSTYLES];
+    cdlight_t       dlights[MAX_DLIGHTS];
+    cparticle_t     *active_particles, *free_particles;
+    cparticle_t     particles[MAX_PARTICLES];
+    explosion_t     explosions[MAX_EXPLOSIONS];
+    laser_t         lasers[MAX_LASERS];
+    beam_t          beams[MAX_BEAMS];
+    beam_t          playerbeams[MAX_BEAMS];
+    cl_sustain_t    sustains[MAX_SUSTAINS];
+} cl_fx_t;
+
+typedef struct {        // view.c scene arrays handed to the renderer
+    int             r_numdlights;
+    dlight_t        r_dlights[MAX_DLIGHTS];
+    int             r_numentities;
+    entity_t        r_entities[MAX_ENTITIES];
+    int             r_numparticles;
+    particle_t      r_particles[MAX_PARTICLES];
+    lightstyle_t    r_lightstyles[MAX_LIGHTSTYLES];
+} cl_scene_t;
+
+typedef struct {        // screen.c
+    centerprint_t   centerprints[MAX_CENTERPRINTS_REAL];
+    unsigned        centerhead, centertail;
+    scr_lag_t       lag;
+    chatline_t      chatlines[MAX_CHAT_LINES];
+    unsigned        chathead;
+    qboolean        currently_scoped_in;
+    // SCR_DrawXhair animation state
+    float           xh_deltatime_factor;
+    int             xh_last_rtime;
+    float           xh_gap, xh_length, xh_elasticity;
+    int             xh_spray;
+} cl_scr_t;
+
+typedef struct {        // input.c
+    kbutton_t       in_klook;
+    kbutton_t       in_left, in_right, in_forward, in_back;
+    kbutton_t       in_lookup, in_lookdown, in_moveleft, in_moveright;
+    kbutton_t       in_strafe, in_speed, in_use, in_attack;
+    kbutton_t       in_up, in_down;
+    int             in_impulse;
+    bool            in_mlooking;
+    float           autosens_x, autosens_y;
+} cl_input_t;
+
+typedef struct client_context_s {
+    client_state_t  cl;
+    centity_t       entities[MAX_EDICTS];
+    client_conn_t   conn;               // saved cls slice while not active
+#if USE_ZLIB
+    z_stream        z;                  // never memcpy'd (zlib self-pointer)
+#endif
+    cmdbuf_t        cmdbuf;             // stufftext
+    char            cmdbuf_text[MAX_STRING_CHARS];
+    cl_fx_t         fx;
+    cl_scene_t      scene;
+    cl_scr_t        scr;
+    cl_input_t      in;
+    int             precache_spawncount;
+    vrect_t         cell;               // window pixels (split_view.c)
+    int             playerNum;          // 0-based slot, never renumbered
+    netsrc_t        sock;               // NS_CLIENT for player 1, NS_CLIENT2.. for extras
+    bool            inUse;
+    // splitscreen extras (playerNum > 0), see split.c
+    bool            precachePending;    // got `precache', waits for player 1's level load
+    bool            dropPending;        // drop at the next safe point
+    char            dropReason[MAX_STRING_CHARS];
+    int             refusals;           // "Bad challenge." retries
+    bool            dropNotice;         // the drop reason stays up in the cell (server's doing)
+    bool            serverDropped;      // svc_disconnect with stufftext still to run (M3)
+    char            serverDropReason[MAX_QPATH * 2];
+    char            lastPrint[MAX_QPATH * 2];   // the last server print, for a kick's reason
+    unsigned        lastPrintTime;
+    unsigned        stuffNoteTime;      // rate limit of the "ignored stufftext" note
+    char            stuffVars[8][MAX_QPATH];    // cvars this player's server created (set)
+    int             numStuffVars;
+    unsigned        cvarsync_poll;     // next cvar sync check (cls.realtime)
+    char            cvarsync_sent[CVARSYNC_MAX][CVARSYNC_MAXSIZE];  // values the server has
+} client_context_t;
+
+extern client_context_t *clx[MAX_SPLITVIEW];
+extern client_context_t *cla;           // active context, never NULL
+
+#define cl              (cla->cl)
+#define cl_entities     (cla->entities)
+#define cl_cmdbuf       (cla->cmdbuf)
+#define cl_cmdbuf_text  (cla->cmdbuf_text)
+#define CL_Z            (cla->z)
+
+#define r_numdlights    (cla->scene.r_numdlights)
+#define r_dlights       (cla->scene.r_dlights)
+#define r_numentities   (cla->scene.r_numentities)
+#define r_entities      (cla->scene.r_entities)
+#define r_numparticles  (cla->scene.r_numparticles)
+#define r_particles     (cla->scene.r_particles)
+#define r_lightstyles   (cla->scene.r_lightstyles)
+
+#include "split/split.h"
 
 //
 // crc.c

@@ -581,6 +581,12 @@ static bool NET_SendLoopPacket(netsrc_t sock, const void *data,
         return false;
     }
 
+    // splitscreen: players 2..8 always talk UDP, never loopback
+    if (sock > NS_SERVER) {
+        Com_DPrintf("%s: loopback refused for socket %d\n", __func__, sock);
+        return false;
+    }
+
     loop = &loopbacks[sock ^ 1];
 
     msg = &loop->msgs[loop->send & (MAX_LOOPBACK - 1)];
@@ -635,6 +641,11 @@ static void NET_ErrorEvent(qsocket_t sock, const netadr_t *from,
         break;
     case NS_SERVER:
         SV_ErrorEvent(from, ee_errno, ee_info);
+        break;
+    default:
+        // splitscreen: socket of local player 2..8
+        if (i < NS_COUNT)
+            CL_SplitErrorEvent(i, from);
         break;
     }
 }
@@ -1270,6 +1281,45 @@ bool NET_GetAddress(netsrc_t sock, netadr_t *adr)
     struct pollfd *s = udp_sockets[sock];
     return s && !os_getsockname(s->fd, adr);
 }
+
+#if USE_CLIENT
+/*
+====================
+NET_OpenSplitSocket
+
+Splitscreen: opens (if not open yet) the UDP socket of local player 2..8 on
+any free port. Closed by NET_CloseSplitSocket or NET_Config(NET_NONE).
+====================
+*/
+bool NET_OpenSplitSocket(netsrc_t sock, bool ipv6)
+{
+    Q_assert(sock > NS_SERVER && sock < NS_COUNT);
+
+    if (ipv6) {
+        if (!udp6_sockets[sock])
+            udp6_sockets[sock] = UDP_OpenSocket(net_ip6->string, PORT_ANY, AF_INET6);
+        return udp6_sockets[sock] != NULL;
+    }
+
+    if (!udp_sockets[sock])
+        udp_sockets[sock] = UDP_OpenSocket(net_ip->string, PORT_ANY, AF_INET);
+    return udp_sockets[sock] != NULL;
+}
+
+void NET_CloseSplitSocket(netsrc_t sock)
+{
+    Q_assert(sock > NS_SERVER && sock < NS_COUNT);
+
+    if (udp_sockets[sock]) {
+        NET_CloseSocket(udp_sockets[sock]);
+        udp_sockets[sock] = NULL;
+    }
+    if (udp6_sockets[sock]) {
+        NET_CloseSocket(udp6_sockets[sock]);
+        udp6_sockets[sock] = NULL;
+    }
+}
+#endif
 
 //=============================================================================
 

@@ -38,6 +38,7 @@ void        Sys_Sleep(int msec);
 
 void    Sys_Init(void);
 void    Sys_AddDefaultConfig(void);
+void    Sys_PrintLocationNote(void);    // splitscreen install self-location
 
 const char  *Sys_ErrorString(int err);
 

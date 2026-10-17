@@ -1166,17 +1166,19 @@ static void GL_InitPostProcTexture(int w, int h)
     qglTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
 }
 
-bool GL_InitFramebuffers(void)
+// sized width x height (the largest scene of the frame with splitscreen
+// cells, else the refdef); smaller scenes use the bottom-left corner
+bool GL_InitFramebuffers(int width, int height)
 {
     Q_assert(gl_static.use_shaders);
 
     GL_ClearErrors();
 
     GL_ForceTexture(TMU_TEXTURE, TEXNUM_PP_SCENE);
-    GL_InitPostProcTexture(glr.fd.width, glr.fd.height);
+    GL_InitPostProcTexture(width, height);
 
-    int w = glr.fd.width;
-    int h = glr.fd.height;
+    int w = width;
+    int h = height;
 
     if (!gl_bloom->integer)
         w = h = 0;
@@ -1189,7 +1191,7 @@ bool GL_InitFramebuffers(void)
     qglFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT1, GL_TEXTURE_2D, gl_bloom->integer ? TEXNUM_PP_BLOOM : GL_NONE, 0);
 
     qglBindRenderbuffer(GL_RENDERBUFFER, gl_static.renderbuffer);
-    qglRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH24_STENCIL8, glr.fd.width, glr.fd.height);
+    qglRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH24_STENCIL8, width, height);
     qglBindRenderbuffer(GL_RENDERBUFFER, 0);
 
     qglFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT, GL_RENDERBUFFER, gl_static.renderbuffer);

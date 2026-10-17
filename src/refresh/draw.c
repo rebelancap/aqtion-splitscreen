@@ -187,37 +187,78 @@ void R_SetColor(uint32_t color)
     draw.colors[1].u8[3] = draw.colors[0].u8[3];
 }
 
+void GL_GetDrawRect(vrect_t *rc)
+{
+    if (draw.rect_set) {
+        *rc = draw.rect;
+    } else {
+        rc->x = rc->y = 0;
+        rc->width = r_config.width;
+        rc->height = r_config.height;
+    }
+}
+
+// with a draw rect set, 2D never draws outside of it
+void GL_ScissorDrawRect(void)
+{
+    if (draw.rect_set) {
+        qglEnable(GL_SCISSOR_TEST);
+        qglScissor(draw.rect.x, r_config.height - (draw.rect.y + draw.rect.height),
+                   draw.rect.width, draw.rect.height);
+        draw.scissor = true;
+    } else if (draw.scissor) {
+        qglDisable(GL_SCISSOR_TEST);
+        draw.scissor = false;
+    }
+}
+
+void R_SetDrawRect(const vrect_t *rc)
+{
+    GL_Flush2D();
+
+    draw.rect_set = false;
+    if (rc && rc->width > 0 && rc->height > 0) {
+        draw.rect.x = max(rc->x, 0);
+        draw.rect.y = max(rc->y, 0);
+        draw.rect.width = min(rc->x + rc->width, r_config.width) - draw.rect.x;
+        draw.rect.height = min(rc->y + rc->height, r_config.height) - draw.rect.y;
+        draw.rect_set = draw.rect.width > 0 && draw.rect.height > 0;
+    }
+
+    GL_Setup2D();
+}
+
 void R_SetClipRect(const clipRect_t *clip)
 {
     clipRect_t rc;
+    vrect_t dr;
     float scale;
 
     GL_Flush2D();
 
     if (!clip) {
 clear:
-        if (draw.scissor) {
-            qglDisable(GL_SCISSOR_TEST);
-            draw.scissor = false;
-        }
+        GL_ScissorDrawRect();
         return;
     }
 
+    GL_GetDrawRect(&dr);
+
     scale = 1 / draw.scale;
 
-    rc.left = clip->left * scale;
-    rc.top = clip->top * scale;
-    rc.right = clip->right * scale;
-    rc.bottom = clip->bottom * scale;
+    rc.left = dr.x + clip->left * scale;
+    rc.top = dr.y + clip->top * scale;
+    rc.right = dr.x + clip->right * scale;
+    rc.bottom = dr.y + clip->bottom * scale;
 
-    if (rc.left < 0)
-        rc.left = 0;
-    if (rc.top < 0)
-        rc.top = 0;
-    if (rc.right > r_config.width)
-        rc.right = r_config.width;
-    if (rc.bottom > r_config.height)
-        rc.bottom = r_config.height;
+    if (rc.left < dr.x)
+        rc.left = dr.x;
+    if (rc.top < dr.y)
+        rc.top = dr.y;
+    if (rc.right > dr.x + dr.width)
+        rc.right = dr.x + dr.width;
+    if (rc.bottom > dr.y + dr.height)
+        rc.bottom = dr.y + dr.height;
     if (rc.right < rc.left)
         goto clear;
     if (rc.bottom < rc.top)
@@ -266,13 +307,16 @@ float R_ClampScale(cvar_t *var)
 
 void R_SetScale(float scale)
 {
+    vrect_t rc;
+
     if (draw.scale == scale)
         return;
 
     GL_Flush2D();
 
-    GL_Ortho(0, Q_rint(r_config.width * scale),
-             Q_rint(r_config.height * scale), 0, -1, 1);
+    GL_GetDrawRect(&rc);
+    GL_Ortho(0, Q_rint(rc.width * scale),
+             Q_rint(rc.height * scale), 0, -1, 1);
 
     draw.scale = scale;
 }

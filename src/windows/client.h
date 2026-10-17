@@ -102,6 +102,9 @@ typedef struct {
 
     bool    alttab_disabled;
 
+    // splitscreen: vid_noactivate (agent test runs; never take focus)
+    bool    noactivate;
+
     enum {
         MODE_SIZE       = BIT(0),
         MODE_POS        = BIT(1),

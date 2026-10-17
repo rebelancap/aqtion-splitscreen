@@ -67,6 +67,7 @@ typedef struct {
     bool        fixed_origin;   // use origin field instead of entnum's origin
     vec3_t      origin;
     int         begin;          // begin on this sample
+    int         context;        // splitscreen: issuing player context
 } playsound_t;
 
 typedef struct {
@@ -82,6 +83,7 @@ typedef struct {
     float       master_vol;     // 0.0-1.0 master volume
     bool        fixed_origin;   // use origin instead of fetching entnum's origin
     bool        autosound;      // from an entity->sound, cleared each frame
+    int         context;        // splitscreen: issuing player context
 #if USE_OPENAL
     unsigned    autoframe;
     unsigned    srcnum;
@@ -167,8 +169,49 @@ extern cvar_t       *s_show;
 extern cvar_t       *s_underwater;
 extern cvar_t       *s_underwater_gain_hf;
 
+// splitscreen (split/split_snd.c): s_split_numents is 0 unless players 2..8
+// are in the game, so none of this runs for one player
+extern int  s_split_numents;
+bool S_SplitLocalEnt(int entnum);
+bool S_SplitDuplicate(const void *sfx, const vec3_t origin, int entnum, int entchannel, float attenuation);
+void S_SplitEntityOrigin(int context, int entnum, vec3_t org);
+void S_SplitUpdate(void);
+
+// nearest listener (DMA, design 6 / M2-T6): players 2..8 whose view is
+// current; a sound is heard from the nearest of these and player 1's
+typedef struct {
+    vec3_t      origin;
+    vec3_t      right;
+    int         player;         // 1..7 = player 2..8
+} s_split_listener_t;
+
+extern s_split_listener_t   s_split_listeners[MAX_SPLITVIEW];
+extern int                  s_split_numlisteners;   // 0 unless extras are in the game
+bool S_SplitMono(void);                             // no stereo pan (3+ players, s_splitPan)
+void S_SplitLogChannel(const channel_t *ch, int player, const vec3_t origin);
+
+// loop sounds of every local player's view, merged by entity number
+typedef struct {
+    int         entnum;
+    int         sound;          // sound_precache index, 0 = none / merged
+    float       volume;
+    float       dist_mult;
+    vec3_t      origin;
+    int         player;         // whose view it came from (0 = player 1)
+} s_split_loop_t;
+
+s_split_loop_t *S_SplitLoopSounds(int *count);
+
+// any local player's own entity
+#define S_IsListenerEnt(entnum) \
+    ((entnum) == listener_entnum || (s_split_numents && S_SplitLocalEnt(entnum)))
+
 #define S_IsFullVolume(ch) \
-    ((ch)->entnum == -1 || (ch)->entnum == listener_entnum || (ch)->dist_mult == 0)
+    ((ch)->entnum == -1 || S_IsListenerEnt((ch)->entnum) || (ch)->dist_mult == 0)
+
+#define S_GetChannelOrigin(ch, org) \
+    (s_split_numents ? S_SplitEntityOrigin((ch)->context, (ch)->entnum, org) : \
+     CL_GetEntitySoundOrigin((ch)->entnum, org))
 
 #define S_IsUnderWater() \
     (cls.state == ca_active && cl.frame.ps.rdflags & RDF_UNDERWATER && s_underwater->integer)

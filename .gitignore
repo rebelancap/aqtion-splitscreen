@@ -12,3 +12,13 @@ clang-build.sh
 /dev
 .DS_Store
 ericw-tools/
+# splitscreen fork (see CLAUDE.md)
+/build/
+/builddir/
+/work/*
+!/work/*-PROVENANCE.md
+/subprojects/packagecache/
+/scripts/msvc-native.ini
+/subprojects/.wraplock
+# scripts/build.sh is ours (the upstream ignore above is for a root build.sh)
+!/scripts/build.sh

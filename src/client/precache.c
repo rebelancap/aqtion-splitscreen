@@ -208,6 +208,7 @@ void CL_RegisterSounds(void)
         cl.sound_precache[i] = S_RegisterSound(s);
     }
     S_EndRegistration();
+    CL_SplitRegistrationChanged();
 }
 
 /*
@@ -428,6 +429,9 @@ void CL_PrepRefresh(void)
     // the renderer can now free unneeded stuff
     R_EndRegistration();
 
+    // splitscreen: the other players' handles are copies of these
+    CL_SplitRegistrationChanged();
+
     // clear any lines of console text
     Con_ClearNotify_f();
 
@@ -496,6 +500,11 @@ void CL_UpdateConfigstring(int index)
 
     if (index >= cl.csr.playerskins && index < cl.csr.playerskins + MAX_CLIENTS) {
         CL_LoadClientinfo(&cl.clientinfo[index - cl.csr.playerskins], s);
+        return;
+    }
+
+    // splitscreen: music and sky are player 1's
+    if (cla->playerNum) {
         return;
     }
 

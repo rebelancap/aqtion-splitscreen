@@ -18,6 +18,7 @@ with this program; if not, write to the Free Software Foundation, Inc.,
 // cl_main.c  -- client main loop
 
 #include "client.h"
+#include "split/gamepad.h"
 
 cvar_t  *rcon_address;
 
@@ -119,13 +120,9 @@ extern cvar_t *gl_brightness;
 #endif
 
 client_static_t cls;
-client_state_t  cl;
 
-centity_t   cl_entities[MAX_EDICTS];
-
-// used for executing stringcmds
-cmdbuf_t    cl_cmdbuf;
-char        cl_cmdbuf_text[MAX_STRING_CHARS];
+// cl, cl_entities and the stufftext buffer (cl_cmdbuf) are per player
+// context: see client_context_t in client.h and split/split.c
 
 //======================================================================
 
@@ -197,7 +194,7 @@ static request_t *CL_FindRequest(void)
     return NULL;
 }
 
-static void CL_UpdateGunSetting(void)
+void CL_UpdateGunSetting(void)
 {
     int nogun;
 
@@ -396,6 +393,10 @@ static void CL_Pause_f(void)
     CL_CheckForPause();
 }
 
+// splitscreen: qports of the local players differ mod 256 (the server
+// demuxes clients of one IP by the low 8 bits for enhanced protocols)
+#define CL_QPORT    (net_qport->integer + 37 * cla->playerNum)
+
 /*
 =================
 CL_CheckForResend
@@ -414,8 +415,8 @@ void CL_CheckForResend(void)
     }
 
     // if the local server is running and we aren't
-    // then connect
-    if (cls.state < ca_connecting && sv_running->integer > ss_loading) {
+    // then connect (player 1 only: extras connect over UDP, split.c)
+    if (cls.state < ca_connecting && sv_running->integer > ss_loading && !cla->playerNum) {
         strcpy(cls.servername, "localhost");
         cls.serverAddress.type = NA_LOOPBACK;
         cls.serverProtocol = cl_protocol->integer;
@@ -444,6 +445,11 @@ void CL_CheckForResend(void)
         return;
     }
 
+    // splitscreen: extras join one at a time
+    if (!CL_SplitMayResend()) {
+        return;
+    }
+
     if (cls.realtime - cls.connect_time < CONNECT_DELAY) {
         return;
     }
@@ -453,7 +459,7 @@ void CL_CheckForResend(void)
 
     if (cls.state == ca_challenging) {
         Com_Printf("Requesting challenge... %i\n", cls.connect_count);
-        OOB_PRINT(NS_CLIENT, &cls.serverAddress, "getchallenge\n");
+        OOB_PRINT(cla->sock, &cls.serverAddress, "getchallenge\n");
         return;
     }
 
@@ -475,28 +481,28 @@ void CL_CheckForResend(void)
     case PROTOCOL_VERSION_R1Q2:
         Q_snprintf(tail, sizeof(tail), " %d %d",
                    maxmsglen, PROTOCOL_VERSION_R1Q2_CURRENT);
-        cls.quakePort = net_qport->integer & 0xff;
+        cls.quakePort = CL_QPORT & 0xff;
         break;
     case PROTOCOL_VERSION_Q2PRO:
         Q_snprintf(tail, sizeof(tail), " %d %d %d %d",
                    maxmsglen, net_chantype->integer, USE_ZLIB,
                    PROTOCOL_VERSION_Q2PRO_CURRENT);
-        cls.quakePort = net_qport->integer & 0xff;
+        cls.quakePort = CL_QPORT & 0xff;
         break;
 	case PROTOCOL_VERSION_AQTION:
 		Q_snprintf(tail, sizeof(tail), " %d %d %d %d",
 			maxmsglen, net_chantype->integer, USE_ZLIB,
 			PROTOCOL_VERSION_AQTION_CURRENT);
-		cls.quakePort = net_qport->integer & 0xff;
+		cls.quakePort = CL_QPORT & 0xff;
 		break;
     default:
         tail[0] = 0;
-        cls.quakePort = net_qport->integer;
+        cls.quakePort = CL_QPORT & 0xffff;
         break;
     }
 
-    Cvar_BitInfo(userinfo, CVAR_USERINFO);
-    Netchan_OutOfBand(NS_CLIENT, &cls.serverAddress,
+    CL_SplitUserinfo(userinfo, Cvar_BitInfo(userinfo, CVAR_USERINFO));
+    Netchan_OutOfBand(cla->sock, &cls.serverAddress,
                       "connect %i %i %i \"%s\"%s\n", cls.serverProtocol, cls.quakePort,
                       cls.challenge, userinfo, tail);
 }
@@ -688,6 +694,12 @@ CL_ClearState
 */
 void CL_ClearState(void)
 {
+    // splitscreen: an extra clears only its own state
+    if (cla->playerNum) {
+        CL_SplitClearState();
+        return;
+    }
+
     S_StopAllSounds();
     OGG_Stop();
     SCR_StopCinematic();
@@ -734,6 +746,12 @@ This is also called on Com_Error, so it shouldn't cause any errors
 */
 void CL_Disconnect(error_type_t type)
 {
+    // splitscreen: an extra drops only its own connection,
+    // player 1 drops the extras first
+    if (CL_SplitDisconnect(type)) {
+        return;
+    }
+
     if (!cls.state) {
         return;
     }
@@ -932,7 +950,7 @@ static void CL_ParsePrintMessage(void)
 
     MSG_ReadString(string, sizeof(string));
 
-    r = CL_FindRequest();
+    r = cla->playerNum ? NULL : CL_FindRequest();   // requests are player 1's
     if (r) {
         switch (r->type) {
         case REQ_STATUS_CL:
@@ -967,6 +985,10 @@ static void CL_ParsePrintMessage(void)
     // and if so, start channenge cycle again
     if ((cls.state == ca_challenging || cls.state == ca_connecting) &&
         NET_IsEqualBaseAdr(&net_from, &cls.serverAddress)) {
+        if (cla->playerNum) {
+            CL_SplitRefused(string);    // retry or drop that player
+            return;
+        }
         Com_Printf("%s", string);
         cls.state = ca_challenging;
         //cls.connect_count = 0;
@@ -1014,6 +1036,15 @@ static void CL_Changing_f(void)
     char *s;
 
     if (cls.state < ca_connected) {
+        return;
+    }
+
+    // splitscreen: an extra only resets its own state
+    if (cla->playerNum) {
+        cls.state = ca_connected;
+        cl.mapname[0] = 0;
+        cl.configstrings[CS_NAME][0] = 0;
+        cla->precachePending = false;
         return;
     }
 
@@ -1071,7 +1102,7 @@ static void CL_Reconnect_f(void)
     if (cls.state >= ca_connected) {
         cls.state = ca_connected;
 
-        if (cls.download.file) {
+        if (cls.download.file && !cla->playerNum) {
             return; // if we are downloading, we don't change!
         }
 
@@ -1395,7 +1426,7 @@ static void CL_ConnectionlessPacket(void)
                 }
             } else if (!strncmp(s, "map=", 4)) {
                 Q_strlcpy(mapname, s + 4, sizeof(mapname));
-            } else if (!strncmp(s, "dlserver=", 9)) {
+            } else if (!strncmp(s, "dlserver=", 9) && !cla->playerNum) {
                 if (!got_server) {
                     HTTP_SetServer(s + 9);
                     got_server = true;
@@ -1403,18 +1434,18 @@ static void CL_ConnectionlessPacket(void)
             }
         }
 
-        if (!got_server) {
+        if (!got_server && !cla->playerNum) {
             HTTP_SetServer(NULL);
         }
 
         Com_Printf("Connected to %s (protocol %d).\n",
                    NET_AdrToString(&cls.serverAddress), cls.serverProtocol);
         Netchan_Close(&cls.netchan);
-        Netchan_Setup(&cls.netchan, NS_CLIENT, type, &cls.serverAddress,
+        Netchan_Setup(&cls.netchan, cla->sock, type, &cls.serverAddress,
                       cls.quakePort, 1024, cls.serverProtocol);
 
 #if USE_AC_CLIENT
-        if (anticheat) {
+        if (anticheat && !cla->playerNum) {    // splitscreen: the module is player 1's
             MSG_WriteByte(clc_nop);
             MSG_FlushTo(&cls.netchan.message);
             Netchan_Transmit(&cls.netchan, 0, NULL, 3);
@@ -1534,6 +1565,12 @@ static void CL_PacketEvent(void)
 
     CL_ParseServerMessage();
 
+    // splitscreen: netgraph, demo and GTV are player 1's
+    if (cla->playerNum) {
+        SCR_LagSample();
+        return;
+    }
+
     SCR_AddNetgraph();
 
     SCR_LagSample();
@@ -1572,6 +1609,13 @@ void CL_ErrorEvent(const netadr_t *from)
 }
 #endif
 
+// splitscreen: packets and stufftext of the active extra player (split.c)
+void CL_ContextEvents(void)
+{
+    NET_GetPackets(cla->sock, CL_PacketEvent);
+    Cbuf_Execute(&cl_cmdbuf);
+}
+
 
 //=============================================================================
 
@@ -1603,6 +1647,12 @@ void CL_UpdateUserinfo(cvar_t *var, from_t from)
 
     if (var == info_skin && from > FROM_CONSOLE && gender_auto->integer) {
         CL_FixUpGender();
+    }
+
+    // splitscreen: the userinfo cvars are player 1's (shared keys also go
+    // to every extra; an extra's own values live in its p<N>_ shadows)
+    if (CL_SplitUserinfoChanged(var)) {
+        return;
     }
 
     if (cls.state < ca_connected) {
@@ -1699,11 +1749,12 @@ static void CL_PlaySound_f(void)
     for (i = 1; i < Cmd_Argc(); i++) {
         Cmd_ArgvBuffer(i, name, sizeof(name));
         COM_DefaultExtension(name, ".wav", sizeof(name));
-        S_StartLocalSound(name);
+        if (CL_SplitSoundAllowed(name, 0))
+            S_StartLocalSound(name);
     }
 }
 
-static int precache_spawncount;
+#define precache_spawncount (cla->precache_spawncount)  // per player context
 
 /*
 =================
@@ -1714,6 +1765,12 @@ Called after all downloads are done. Not used for demos.
 */
 void CL_Begin(void)
 {
+    // splitscreen: an extra reuses player 1's registration (split.c)
+    if (cla->playerNum) {
+        cls.state = ca_precached;
+        goto begin;
+    }
+
 #if USE_REF
     if (!Q_stricmp(cl.gamedir, "gloom")) {
         // cheat protect our custom modulate cvars
@@ -1732,6 +1789,7 @@ void CL_Begin(void)
     CL_LoadState(LOAD_NONE);
     cls.state = ca_precached;
 
+begin:
 #if USE_FPS
     CL_UpdateRateSetting();
 #endif
@@ -1758,6 +1816,12 @@ before allowing the client into the server
 static void CL_Precache_f(void)
 {
     if (cls.state < ca_connected) {
+        return;
+    }
+
+    // splitscreen: an extra waits for player 1's level and copies it
+    if (cla->playerNum) {
+        CL_SplitPrecache();
         return;
     }
 
@@ -2196,6 +2260,7 @@ static void CL_WriteConfig_f(void)
 
     FS_FPrintf(f, "// generated by q2pro\n");
 
+    CL_ProfileConfigBegin();    // splitscreen: player 1's own settings, not a profile's
     if (bindings) {
         FS_FPrintf(f, "\n// key bindings\n");
         Key_WriteBindings(f);
@@ -2208,6 +2273,7 @@ static void CL_WriteConfig_f(void)
         FS_FPrintf(f, "\n//%s cvars\n", modified ? "modified" : "archived");
         Cvar_WriteVariables(f, mask, modified);
     }
+    CL_ProfileConfigEnd();
 
     if (FS_CloseFile(f))
         Com_EPrintf("Error writing %s\n", buffer);
@@ -2368,8 +2434,10 @@ static void CL_WriteConfig(void)
 
     FS_FPrintf(f, "// generated by " APPLICATION ", do not modify\n");
 
+    CL_ProfileConfigBegin();    // splitscreen: player 1's own settings, not a profile's
     Key_WriteBindings(f);
     Cvar_WriteVariables(f, CVAR_ARCHIVE, false);
+    CL_ProfileConfigEnd();
 
     if (FS_CloseFile(f))
         Com_EPrintf("Error writing %s\n", COM_CONFIG_CFG);
@@ -2602,6 +2670,11 @@ static void exec_server_string(cmdbuf_t *buf, const char *text)
         return;
     }
 
+    // splitscreen: an extra's server may change only that player (split.c)
+    if (cla->playerNum && !CL_SplitStufftext(text)) {
+        return;
+    }
+
     // optional whitelist filtering
     if (!allow_stufftext(text)) {
         return;
@@ -2618,6 +2691,14 @@ static void cl_gun_changed(cvar_t *self)
 
 static void info_hand_changed(cvar_t *self)
 {
+    // splitscreen: `hand' is player 1's; extras' p<N>_hand send their own
+    if (cla->playerNum) {
+        if (CL_SplitPushView(0)) {
+            CL_UpdateGunSetting();
+            CL_PopContext();
+        }
+        return;
+    }
     CL_UpdateGunSetting();
 }
 
@@ -2884,6 +2965,9 @@ static void CL_InitLocal(void)
     #endif
     info_version = Cvar_Get("version", "", CVAR_USERINFO);
 
+    // splitscreen: p<N>_name, ... for players 2..8
+    CL_SplitInitUserinfo();
+
     #if USE_AQTION
         cl_mk23_sound = Cvar_Get("cl_mk23_sound", "0", 0);
         cl_mp5_sound = Cvar_Get("cl_mp5_sound", "0", 0);
@@ -2937,6 +3021,7 @@ Called before executing configs to register commands such as `bind' or
 void CL_PreInit(void)
 {
     Key_Init();
+    PAD_PreInit();  // splitscreen: pbind before config.cfg
 
     List_Init(&cl_ignore_text);
     List_Init(&cl_ignore_nick);
@@ -3121,6 +3206,40 @@ static void CL_CheckTimeout(void)
     } else {
         cl.timeoutcount = 0;
     }
+}
+
+/*
+=================
+CL_ContextFrame
+
+Splitscreen: the per-context part of CL_Frame for the active extra player
+(split.c, error-guarded). Player 1 runs the same steps inline in CL_Frame.
+=================
+*/
+void CL_ContextFrame(int msec, bool phys_frame)
+{
+    if (!sv_paused->integer) {
+        cl.time += msec;
+#if USE_FPS
+        cl.keytime += msec;
+#endif
+    }
+
+    if (cls.state == ca_active && !sv_paused->integer)
+        CL_SetClientTime();
+
+    CL_CheckForResend();
+
+    CL_UpdateCmd(msec);
+
+    if (phys_frame || cl.sendPacketNow)
+        CL_FinalizeCmd();
+
+    CL_SendCmd();
+
+    CL_PredictMovement();
+
+    CL_CheckTimeout();
 }
 
 /*
@@ -3335,7 +3454,7 @@ unsigned CL_Frame(unsigned msec)
     case SYNC_MAXFPS:
         // everything ticks in sync with refresh
         if (main_extra < main_msec) {
-            if (!cl.sendPacketNow) {
+            if (!CL_SplitSendPacketNow()) {
                 return 0;
             }
             ref_frame = false;
@@ -3381,7 +3500,7 @@ unsigned CL_Frame(unsigned msec)
     CL_UpdateCmd(main_extra);
 
     // finalize pending cmd
-    phys_frame |= cl.sendPacketNow;
+    phys_frame |= CL_SplitSendPacketNow();   // any player's
     if (phys_frame) {
         CL_FinalizeCmd();
         phys_extra -= phys_msec;
@@ -3399,6 +3518,9 @@ unsigned CL_Frame(unsigned msec)
 
     // predict all unacknowledged movements
     CL_PredictMovement();
+
+    // splitscreen: the same steps for players 2..8
+    CL_SplitFrame(main_extra, phys_frame);
 
     Con_RunConsole();
 
@@ -3459,6 +3581,9 @@ bool CL_ProcessEvents(void)
     Cbuf_Execute(&cmd_buffer);
     Cbuf_Execute(&cl_cmdbuf);
 
+    // splitscreen: packets and stufftext of players 2..8
+    CL_SplitProcessEvents();
+
     HTTP_RunDownloads();
 
     CL_GTV_Run();
@@ -3467,7 +3592,7 @@ bool CL_ProcessEvents(void)
     CL_RunDiscord();
 #endif //rekkie -- discord -- e
 
-    return cl.sendPacketNow;
+    return CL_SplitSendPacketNow();
 }
 
 //============================================================================
@@ -3489,6 +3614,8 @@ void CL_Init(void)
 
     // all archived variables will now be loaded
 
+    CL_InitContexts();
+
     // start with full screen console
     cls.key_dest = KEY_CONSOLE;
 
@@ -3497,9 +3624,11 @@ void CL_Init(void)
 
     CL_InitLocal();
     IN_Init();
+    PAD_Init();
+    CL_ProfileInit();
 
 #if USE_ZLIB
-    Q_assert(inflateInit2(&cls.z, -MAX_WBITS) == Z_OK);
+    Q_assert(inflateInit2(&CL_Z, -MAX_WBITS) == Z_OK);
 #endif
 
     SCR_InitCinematics();
@@ -3555,15 +3684,17 @@ void CL_Shutdown(void)
     CL_Disconnect(ERR_FATAL);
 
 #if USE_ZLIB
-    inflateEnd(&cls.z);
+    inflateEnd(&CL_Z);
 #endif
 
     HTTP_Shutdown();
     OGG_Shutdown();
     S_Shutdown();
     IN_Shutdown();
+    PAD_Shutdown();
     Con_Shutdown();
     CL_ShutdownRefresh();
+    CL_ProfileShutdown();   // player 1's own settings back before the config is written
     CL_WriteConfig();
 
     memset(&cls, 0, sizeof(cls));

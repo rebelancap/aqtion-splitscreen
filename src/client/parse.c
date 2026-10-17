@@ -603,7 +603,7 @@ static void CL_ParseServerData(void)
     // do not change gamedir if connected to local sever either,
     // as it was already done by SV_InitGame, and changing it
     // here will not work since server is now running
-    if (!cls.demo.playback && !sv_running->integer) {
+    if (!cls.demo.playback && !sv_running->integer && !cla->playerNum) {
         // pretend it has been set by user, so that 'changed' hook
         // gets called and filesystem is restarted
         Cvar_UserSet("game", cl.gamedir);
@@ -816,7 +816,7 @@ static void CL_ParseServerData(void)
 
     if (cinematic) {
         SCR_PlayCinematic(levelname);
-    } else {
+    } else if (!cla->playerNum) {   // splitscreen: player 1's console only
         // seperate the printfs so the server message can have a color
         Con_Printf(
             "\n\n"
@@ -1153,6 +1153,12 @@ static void CL_ParsePrint(void)
 
     SHOWNET(3, "    %i \"%s\"\n", level, Com_MakePrintable(s));
 
+    // splitscreen: an extra's prints go to its own chat HUD / centerprint
+    if (cla->playerNum) {
+        CL_SplitPrint(level, s);
+        return;
+    }
+
     if (level != PRINT_CHAT) {
         if (cl.csr.extended && (level == PRINT_TYPEWRITER || level == PRINT_CENTER))
             SCR_CenterPrint(s, level == PRINT_TYPEWRITER);
@@ -1215,7 +1221,7 @@ static void CL_ParseCenterPrint(void)
     SHOWNET(3, "    \"%s\"\n", Com_MakePrintable(s));
     SCR_CenterPrint(s, false);
 
-    if (!cls.demo.playback && cl.serverstate != ss_broadcast) {
+    if (!cls.demo.playback && cl.serverstate != ss_broadcast && !cla->playerNum) {
         COM_strclr(s);
         Cmd_ExecTrigger(s);
     }
@@ -1302,13 +1308,13 @@ static void CL_ParseZPacket(void)
         Com_Error(ERR_DROP, "%s: invalid output length", __func__);
     }
 
-    inflateReset(&cls.z);
+    inflateReset(&CL_Z);
 
-    cls.z.next_in = MSG_ReadData(inlen);
-    cls.z.avail_in = inlen;
-    cls.z.next_out = buffer;
-    cls.z.avail_out = outlen;
-    ret = inflate(&cls.z, Z_FINISH);
+    CL_Z.next_in = MSG_ReadData(inlen);
+    CL_Z.avail_in = inlen;
+    CL_Z.next_out = buffer;
+    CL_Z.avail_out = outlen;
+    ret = inflate(&CL_Z, Z_FINISH);
     if (ret != Z_STREAM_END) {
         Com_Error(ERR_DROP, "%s: inflate() failed with error %d", __func__, ret);
     }
@@ -1376,23 +1382,39 @@ AQTION Protocol CVAR Sync
 ============
 */
 #ifdef PROTOCOL_VERSION_AQTION_CVARSYNC
-void CL_SendCvarSync(cvar_t *var)
+// splitscreen: also the extras' sender (split.c), on the active netchan
+bool CL_WriteCvarSync(int index, const char *value)
 {
 	char val_str[CVARSYNC_MAXSIZE];
-	Q_strlcpy(val_str, var->string, CVARSYNC_MAXSIZE);
+	Q_strlcpy(val_str, value, CVARSYNC_MAXSIZE);
 	val_str[CVARSYNC_MAXSIZE - 1] = 0;
 
 	if (!cls.netchan.protocol) {
-		return;
+		return false;
 	}
 
 	if (cls.serverProtocol != PROTOCOL_VERSION_AQTION || cls.protocolVersion < PROTOCOL_VERSION_AQTION_CVARSYNC)
-		return;
+		return false;
 
 	MSG_WriteByte(clc_cvarsync);
-	MSG_WriteByte(var->sync_index);
+	MSG_WriteByte(index);
 	MSG_WriteString(val_str);
 	MSG_FlushTo(&cls.netchan.message);
+	return true;
+}
+
+void CL_SendCvarSync(cvar_t *var)
+{
+	// splitscreen: the shared cvar is player 1's; extras poll theirs
+	if (cla->playerNum) {
+		if (CL_SplitPushView(0)) {
+			CL_SendCvarSync(var);
+			CL_PopContext();
+		}
+		return;
+	}
+
+	CL_WriteCvarSync(var->sync_index, var->string);
 }
 
 static void CL_ParseCvarSync(void)
@@ -1434,9 +1456,15 @@ static void CL_ParseCvarSync(void)
 
 		Com_Printf("CL adding cvarsync: %s, %s\n", cl.cvarsync[i].name, var->string);
 
+		if (cla->playerNum)
+			continue;	// splitscreen: an extra answers from its shadows below
+
 		if (strcmp(cl.cvarsync[i].value, var->string)) // if value is not default, sync the value
 			CL_SendCvarSync(var);
 	}
+
+	if (cla->playerNum)
+		CL_SplitCvarSyncParsed();
 }
 #endif
 
@@ -1497,6 +1525,9 @@ void CL_ParseServerMessage(void)
 			break;
 
 		case svc_disconnect:
+			// splitscreen: an extra drops alone, with a kick's reason
+			if (cla->playerNum && CL_SplitServerDisconnect())
+				return;
 			Com_Error(ERR_DISCONNECT, "Server disconnected");
 			break;
 
@@ -1527,7 +1558,8 @@ void CL_ParseServerMessage(void)
 
 		case svc_sound:
 			CL_ParseStartSoundPacket();
-			S_ParseStartSound();
+			if (CL_SplitSoundAllowed(cl.configstrings[cl.csr.sounds + snd.index], snd.entity))
+				S_ParseStartSound();
 			break;
 
         case svc_spawnbaseline:

@@ -736,6 +736,15 @@ static void Strings_Push(menuSpinControl_t *s)
         }
     }
 
+    // splitscreen: an unset nextserver shows (and gets, on pop) the first
+    // entry, so AQtion's "Play with bots" map row ("map $nextserver force")
+    // never starts with no map, which loaded maps/force.bsp. Only that cvar:
+    // an empty cvar behind any other strings spinner stays empty.
+    if (!s->cvar->string[0] && s->numItems > 0 && !Q_stricmp(s->cvar->name, "nextserver")) {
+        s->curvalue = 0;
+        return;
+    }
+
     s->curvalue = -1;
 }
 
@@ -1968,6 +1977,32 @@ void Menu_Size(menuFrameWork_t *menu)
         }
     }
 
+}
+
+// splitscreen fork (ui.c menu size): the height in virtual pixels the menu
+// needs with the default layout, items, banner and bounds; 0 for a menu that
+// lays itself out (it adapts to any height)
+int Menu_NeededHeight(const menuFrameWork_t *menu)
+{
+    const menuCommon_t *item;
+    int i, h = 0, side = 0;
+
+    if (menu->size && menu->size != Menu_Size)
+        return 0;
+    for (i = 0; i < menu->nitems; i++) {
+        item = menu->items[i];
+        if (item->flags & QMF_HIDDEN)
+            continue;
+        h += item->type == MTYPE_BITMAP ? GENERIC_SPACING(item->height) : MENU_SPACING;
+    }
+    if (menu->banner)
+        h += GENERIC_SPACING(menu->banner_rc.height);
+    if (menu->plaque)
+        side += menu->plaque_rc.height;
+    if (menu->logo)
+        side += menu->logo_rc.height + 5;
+    // bounds expand by MENU_SPACING; the status line sits at the bottom
+    return max(h, side) + 2 * MENU_SPACING + 2 * CONCHAR_HEIGHT;
 }
 
 menuCommon_t *Menu_ItemAtCursor(menuFrameWork_t *m)

@@ -1006,7 +1006,9 @@ void GL_UpdateBlurParams(void)
     if (!gl_bloom->integer)
         return;
 
-    float sigma = Cvar_ClampValue(gl_bloom_sigma, 1, MAX_SIGMA) * glr.fd.height / 1080;
+    // the post-process FBO's height (splitscreen: the largest cell)
+    int height = glr.framebuffer_height ? glr.framebuffer_height : glr.fd.height;
+    float sigma = Cvar_ClampValue(gl_bloom_sigma, 1, MAX_SIGMA) * height / 1080;
 
     if (gl_static.bloom_sigma == sigma)
         return;

@@ -1175,6 +1175,14 @@ ENTRY POINT
 
 static bool probe(void)
 {
+    // splitscreen: without WAYLAND_DISPLAY / WAYLAND_SOCKET libwayland falls
+    // back to "wayland-0". Gamescope unsets WAYLAND_DISPLAY and gives its
+    // clients only its own Xwayland DISPLAY, so connecting to wayland-0 there
+    // would put the game on the desktop's compositor, outside the Gamescope
+    // window (nested Gamescope / Steam launch options). Use X11 instead.
+    if (!getenv("WAYLAND_DISPLAY") && !getenv("WAYLAND_SOCKET"))
+        return false;
+
     struct wl_display *dpy = wl_display_connect(NULL);
 
     if (dpy) {
