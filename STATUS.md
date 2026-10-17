@@ -2,16 +2,24 @@
 
 ## Current state
 
-**1.0.0 (2026-10-16): first public release, in progress.** Tree = 0.0.0.34
-(Windows pass + Linux L1-L3) + the release workflow (`.github/workflows/
-release.yml` replaces upstream's build / nightly / release workflows: tag
-`v<VERSION>` -> Windows zip + Linux tar.gz on the GitHub release), the
+**1.0.0 (published 2026-10-17):**
+https://github.com/rebelancap/aqtion-splitscreen/releases/tag/v1.0.0 with
+`aqtion-splitscreen-1.0.0-windows-x86_64.zip` (1,432,954 bytes, SHA-256
+`42692530af819d23...`) and `aqtion-splitscreen-1.0.0-linux-x86_64.tar.gz`
+(762,482 bytes, SHA-256 `114943139bb0303c...`), both built by
+`.github/workflows/release.yml` (run 39007863864, all jobs green: Linux job
+glibc check passed, Windows VS 2022). Tree = 0.0.0.34 (Windows pass + Linux
+L1-L3) + the workflow (replaces upstream's build / nightly / release), the
 fork's bug-report template, Linux install text in README.md and the 1.0.0
 CHANGELOG section. Public `main` = upstream `aqtion` history + one squashed
-commit (the dev commits stay on `splitscreen` and the Linux test box's
-mirror). The maintainer's installed Windows exe is 0.0.0.34 (same code as
-1.0.0 except the version string). The CI binaries are untested until the
-first tag run; the Linux job must show max GLIBC_2.35.
+commit (6b004d0c) + follow-ups; the dev commits stay on `splitscreen` and
+the Linux test box's mirror. Quirk: the `v1.0.0` tag push did not start the
+workflow (twice; a `workflow_dispatch` run did), so the release was created
+with `gh release create` from that run's artifacts; the `release` job is
+untested until the next tag. Smoke test of the CI Windows exe from the
+AQtion root with Steam's DLL: `work/steamtest-home/action/logs/rel100.log`
+(version 1.0.0, 2 players, bots, screenshot `rel100-01-2players.jpg`). The
+maintainer's installed exe is still the 0.0.0.34 build (same code).
 
 **0.0.0.34 (Windows, installed in the maintainer's AQtion folder):**
 `build\aqtion-splitscreen-0.0.0.34-windows-x86_64.zip` (the Windows
@@ -1646,12 +1654,13 @@ fixed in 0.0.0.17).
 
 ## Next steps
 
-0. **Release 1.0.0 (in progress, Windows lead):** repo `rebelancap/aqtion-splitscreen`,
-   push `main`, tag `v1.0.0`, watch the run; if a job fails, fix on `main`
-   (merge back into `splitscreen`), delete the tag + draft release, re-tag.
-   After a green run: smoke-test both assets (Windows zip here, Linux
-   tar.gz on the Linux test box), then the Steam Deck / Windows hands-on
-   checks below.
+0. **After 1.0.0:** smoke-test the Linux tar.gz on the Linux test box (the
+   box was offline at release time; its mirror also needs `git push
+   <linux-box> splitscreen`), then the hands-on checks below. On the next
+   tag, check whether the tag push starts the workflow; if not again, keep
+   the manual path (`gh workflow run release --ref main`, `gh run download`,
+   `gh release create v<V> --notes-file <CHANGELOG section>`). Dev builds
+   now number `1.0.0.N`.
 
 1. **The maintainer's Linux / Steam Deck hands-on checklist** (0.0.0.34;
    the box or a Deck, real pads). The build is in
