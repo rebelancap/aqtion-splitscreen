@@ -234,14 +234,17 @@ zip was `aqtion-splitscreen-<VERSION>.zip` up to 0.0.0.33).
 `__isoc23_sscanf` / `strtol` / `strtoul`), no libstdc++. Release binaries
 are built by CI on Ubuntu 22.04 (glibc 2.35), which runs on any SteamOS 3
 and current desktop distros. All other libraries are the system's own
-(SDL2, libcurl, libpng, libjpeg-turbo, zlib, libGL/libEGL, Wayland,
-libdecor, X11/Xi). Steam puts its old runtime libcurl first for games and
+(SDL2, libcurl, libpng, zlib, libGL/libEGL, Wayland, libdecor, X11/Xi),
+except libjpeg-turbo, which the CI build links statically (below). Steam puts its old runtime libcurl first for games and
 non-Steam shortcuts: the game starts, but an HTTP download (online, missing
 files) would stop it on `curl_multi_poll` (`ldd -r`, not run; AQtion's own `launch.sh` works
-around the same thing). An Ubuntu build links `libjpeg.so.8` (Steam's
+around the same thing). A plain Ubuntu build links `libjpeg.so.8` (Steam's
 runtime and SteamOS have it; Fedora / Bazzite only `.so.62`, so it would
-not start there outside Steam, like AQtion's own `q2pro`): STATUS Open
-questions.
+not start there outside Steam, like AQtion's own `q2pro`), so since
+1.0.0.1 the CI job builds `subprojects/libjpeg-turbo.wrap` as a static
+subproject (`--force-fallback-for=libjpeg-turbo`, Meson from pip) and
+fails if NEEDED lists libjpeg. `scripts/build.sh` still links the
+system's shared libjpeg.
 
 ## 3. SDL2 and input on Windows
 

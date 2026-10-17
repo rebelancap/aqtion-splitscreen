@@ -2,6 +2,11 @@
 
 ## Current state
 
+**1.0.0.1 (dev, pending release):** the CI Linux binary links
+libjpeg-turbo 3.1.0 statically (no libjpeg in NEEDED), so it starts on
+Fedora / Bazzite outside Steam; verified in workflow run 39009418712 (not
+released, no tag).
+
 **1.0.0 (published 2026-10-17):**
 https://github.com/rebelancap/aqtion-splitscreen/releases/tag/v1.0.0 with
 `aqtion-splitscreen-1.0.0-windows-x86_64.zip` (1,432,954 bytes, SHA-256
@@ -299,6 +304,27 @@ host row "Cell layout"; notices never take a player's cell.
 
 ## Last round
 
+**Linux release binary without libjpeg.so.8 (1.0.0.1), 2026-10-17,
+branch `splitscreen` (tree synced to `main`).** The `linux-x86_64` job now
+builds libjpeg-turbo from `subprojects/libjpeg-turbo.wrap` as a static
+subproject (`--force-fallback-for=libjpeg-turbo` next to
+`-Dwrap_mode=nofallback`; Meson 1.12.1 from pip because the wrap needs
+>= 0.64 and 22.04's apt has 0.61) and the "Check glibc and NEEDED" step
+fails if NEEDED lists libjpeg or the binary lacks libjpeg-turbo. No
+meson.build change. Run 39009418712 (`workflow_dispatch` on `main`, all
+jobs green, release job skipped): gcc 11.4 builds the subproject (only
+`-Wimplicit-function-declaration` warnings for `setenv`, which gcc 15
+makes an error); NEEDED = libz, libm, libpng16, libcurl.so.4, libSDL2-2.0,
+libX11, libXi, libGL, libwayland-client / -cursor / -egl, libdecor-0,
+libEGL, libc; max GLIBC_2.34; binary 2,167,016 bytes (1.0.0: 1,556,712),
+contains "libjpeg-turbo version 3.1.0" and 1.0.0.1. On the Linux test box
+(Bazzite 43, only `libjpeg.so.62`), `ldd` on the CI binary resolves every
+library, none "not found" (one harmless "libcurl.so.4: no version
+information" note, Fedora's curl has no symbol versions); the game was not
+run there. Windows job unchanged and green (version resource 1.0.0.1).
+
+## Previous rounds
+
 **Windows pass of 0.0.0.34 after the Linux merge, 2026-10-16, branch
 `splitscreen`.** `linux` (L1-L3) was fast-forward-merged into
 `splitscreen` (`7c8c91d4`); this round builds, checks and installs it on
@@ -368,8 +394,6 @@ Windows and renames the Windows archive.
   resource 0.0.0.34, 3,491,840 bytes, SHA-256 `486b2286...9ec49e02`).
   `work/aqhome/action/q2config.cfg` restored byte-identical
   (`4b0f8926...b79f692c`).
-
-## Previous rounds
 
 **L3: Steam Deck shape, packaging, test install (0.0.0.34), 2026-10-16,
 the Linux test box, branch `linux`.** Per `docs/LINUX-BOOTSTRAP.md` round
@@ -1983,14 +2007,12 @@ fixed in 0.0.0.17).
   `aqtion-splitscreen-<V>-windows-x86_64.zip` (`package.ps1`), Linux
   `aqtion-splitscreen-<V>-linux-x86_64.tar.gz`, as Quake3e-splitscreen
   does; the workflow follows (Next steps 0).
-- **Linux binary's libjpeg (new, L3):** an Ubuntu 22.04 CI build links
-  `libjpeg.so.8`: present on SteamOS (Arch's libjpeg-turbo) and in Steam's
-  runtime, missing on Fedora / Bazzite outside Steam (AQtion's own Linux
-  `q2pro` has the same gap). Default: ship it like that for the first
-  release (Steam Deck and Ubuntu-likes are the target; README says to add
-  it to Steam); later, link libjpeg-turbo statically in CI
-  (`--force-fallback-for=libjpeg-turbo`; it failed here only on gcc 15's
-  implicit-declaration error, gcc 11 on 22.04 should pass).
+- **Linux binary's libjpeg (L3; resolved in 1.0.0.1):** 1.0.0's Ubuntu
+  22.04 CI build linked `libjpeg.so.8` (missing on Fedora / Bazzite
+  outside Steam). Since 1.0.0.1 CI links libjpeg-turbo statically
+  (`--force-fallback-for=libjpeg-turbo`, gcc 11 builds it) and checks
+  NEEDED; left open only for the maintainer: when to release it (1.0.0
+  users on Fedora-based desktops still need Steam's runtime).
 - **Steam's old libcurl (new, L3):** Steam puts its runtime's libcurl
   (7.x, no `curl_multi_poll`) first for games and non-Steam shortcuts; the
   game runs, but an HTTP download from a server would stop it. AQtion's
